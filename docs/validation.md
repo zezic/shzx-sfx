@@ -5,8 +5,8 @@ These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- `cargo test --all-targets --release --locked --offline`: 82 tests passed.
-- `cargo test --no-default-features --release --locked --offline`: 56 tests passed.
+- `cargo test --all-targets --release --locked --offline`: 90 tests passed.
+- `cargo test --no-default-features --release --locked --offline`: 63 tests passed.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
 - The scoped allocator audit includes first rendering, all effect families,
@@ -38,15 +38,15 @@ intensity 0.6:
 
 | Signal | Peak | RMS in the measured window |
 | --- | ---: | ---: |
-| Click, isolated UI | -4.65 dBFS | -23.50 dBFS |
-| Confirm, isolated UI | -6.75 dBFS | -22.72 dBFS |
-| Order fill, isolated UI | -3.02 dBFS | -21.07 dBFS |
+| Click, isolated UI after comfort EQ | -7.67 dBFS | -28.12 dBFS |
+| Confirm, isolated UI after comfort EQ | -11.25 dBFS | -26.78 dBFS |
+| Order fill, isolated UI after comfort EQ | -8.38 dBFS | -26.14 dBFS |
 | Full environment, 1-3 seconds | -13.51 dBFS | -24.09 dBFS |
 | Texture alone, 1-3 seconds | -18.37 dBFS | -31.68 dBFS |
 | Harmony alone, intro window | -26.57 dBFS | -37.23 dBFS |
 | Melody alone, active source | -20.40 dBFS | -27.09 dBFS |
 
-The loudest default effect in the current 37-effect sweep peaked at -2.23 dBFS.
+The loudest default effect in the current 37-effect sweep peaked at -3.22 dBFS.
 The output is linear below its stereo-linked soft knee and approaches a 0.95
 sample ceiling under overload. This is a sample ceiling, not a true-peak meter.
 A 0-to-+6 dB boost comparison below the knee had 0.0401% relative waveform RMS
@@ -121,13 +121,13 @@ Runs were sequential without simultaneous native playback.
 | Workload | Audio duration | Elapsed | Elapsed/audio duration |
 | --- | ---: | ---: | ---: |
 | Idle environment and scene changes (dense-reverb baseline) | 60 s | 1.598 s | 2.66% |
-| Interactive, current layers, about six UI requests/s | 30 s | 0.886 s | 2.95% |
-| Stress, current layers, 200 long requests/s | 15 s | 1.418 s | 9.45% |
+| Interactive, six layers, about six UI requests/s | 30 s | 1.170 s | 3.90% |
+| Stress, six layers, 200 long requests/s | 15 s | 1.585 s | 10.57% |
 
 Current stress filled 32 voices, generated 1,092, stole 989, and suppressed 1,904
 requests through priority/cooldown admission. Interactive playback needed at
-most six voices and did not steal or suppress events. Larger optional voice
-caps increase worst-case cost. Offline percentages measure throughput, not
+most six voices and did not steal or suppress events. The saturated 32-voice stress case is near the approximate 10% throughput
+target. Larger optional voice caps increase worst-case cost. Offline percentages measure throughput, not
 native callback utilization or a selected CPU core class.
 
 Windows and Linux runtime playback still require checks on those hosts. CPAL
@@ -160,7 +160,7 @@ Focus and Confirm decreased about 3.6 dB. The master and output bus gains
 were unchanged. High-passed low-index tonal sequences carry more presence;
 quiet 7.2 kHz HP phase-modulated shimmer provides longer fine detail.
 
-Four public composition tests prove that five same-seed solos reconstruct
+Four public composition tests prove that six same-seed solos reconstruct
 the full dry voice below the output knee, selection metadata is truthful,
 legacy event JSON defaults to all layers, all 37 recipes serialize valid
 components, tonal/shimmer bands are high-passed, and Shimmer is silent at
@@ -177,3 +177,40 @@ contribution to the mix.
 An updated 12-second SFX-only audition is exported outside the repository,
 with a sibling JSONL trace. It peaks at -2.64 dBFS and measures -27.70 dBFS RMS
 including gaps. Runtime synthesis still uses no recorded audio assets.
+
+## Comfort EQ, Crisp layer, and palette-side inspection
+
+Three actual-filter tests verify a -9 dB bell at 3 kHz across 8, 44.1, 48, 96,
+and 192 kHz, with Q 0.65. At 48 kHz the 1.5 and 6 kHz attenuation is about
+4.5 dB; 300 Hz and upper-air bands remain largely unchanged. The two channel
+states are independent and finite. All 37 public recipes report the same EQ
+constant used to construct the renderer filters. The stage follows the SFX
+voice sum, before both dry playback and its reverb send; BG is unaffected.
+
+A matched OnlyTonal OrderFill comparison isolates the EQ from the new layer:
+RMS fell 7.19 dB and 2-4 kHz power fell 8.51 dB. The rendered result matches a
+reference bell applied to the pinned pre-EQ waveform within 0.0645% relative
+RMS error. The loudness regression floors were revised to include this
+requested attenuation, rather than adding global gain that would undo it.
+
+Crisp adds independently seeded low/high oscillators, an auxiliary oscillator,
+LP-colored noise, frequency/PM/noise parameter contours, and ratcheted gain.
+Two HP stages leave only the high band starting near 6 kHz, with an upper LP
+at 16 kHz. Actual-wave tests verify more than 92% energy above 6 kHz, a quiet
+level relative to the tonal path, absence at 8 kHz, and a spectral-centroid
+change exceeding 1 kHz during the contour. Existing five-layer RNG choices
+are preserved. The full/solo reconstruction test now covers six components.
+
+Click/SecondaryClick and other sharp routines now have lower held levels and
+slightly longer decay/release. A waveform regression verifies late-body
+energy below 12% of front energy. Long order/dialog/alert/connectivity
+signatures retain their timing. The scoped allocator audit now runs at both
+8 and 48 kHz, including an active high-band Crisp solo, with zero allocations
+and deallocations.
+
+A new native muted TUI test at 80x24 and 160x36 verified palette left and
+inspector right, visible EQ and all six components, mouse all/Crisp/secondary
+auditions, and BG monitor preservation on other pages. It exited normally
+and restored terminal state. A 12-second SFX audition peaks at -5.66 dBFS,
+RMS -32.92 dBFS including gaps; a separate Crisp-only export is available for
+checking the high-frequency texture without the other components.

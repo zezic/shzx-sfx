@@ -14,6 +14,7 @@ mod playback;
 mod renderer;
 mod reverb;
 mod sfx;
+mod sfx_eq;
 
 pub use error::{Error, Result};
 pub use harmony::{Chord, ChordShape, GLOBAL_SCALE, ScaleDegree};
@@ -25,3 +26,4 @@ pub use sfx::{
     SfxBurst, SfxDetail, SfxEnvelope, SfxFilterGesture, SfxGenerator, SfxLayer, SfxLayerRecipe,
     SfxModulation, SfxPatch, SfxPitch, SfxRecipe, SfxStep,
 };
+pub use sfx_eq::{SFX_EQ, SfxEq};

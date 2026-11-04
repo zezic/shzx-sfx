@@ -263,7 +263,7 @@ struct RenderArgs {
     /// Render one effect without the background instead of a scripted scene.
     #[arg(long, conflicts_with = "script")]
     effect: Option<SfxKind>,
-    /// Component to render: all, body, texture, tonal, flecks, or shimmer.
+    /// Component to render: all, body, texture, tonal, flecks, shimmer, or crisp.
     #[arg(long, requires = "effect")]
     layer: Option<String>,
     #[arg(long, default_value_t = 256)]
@@ -984,7 +984,11 @@ fn print_recipe(kind: SfxKind, json: bool) -> CliResult<()> {
     }
     println!("{kind}: nominal procedural recipe");
     println!(
-        "Signal path: phrase/envelopes -> layer generators and HP/LP filters -> layer levels -> sum -> pan/Haas -> UI dry and reverb send -> output mixer."
+        "Shared SFX EQ: {:.0} Hz, {:+.1} dB, Q {:.2} (dry and reverb send)",
+        recipe.eq.center_hz, recipe.eq.gain_db, recipe.eq.q
+    );
+    println!(
+        "Signal path: phrase/envelopes -> layer generators and HP/LP filters -> layer levels -> sum -> pan/Haas -> SFX EQ -> UI dry and reverb send -> output mixer."
     );
     println!("Patch: {}", recipe.patch);
     println!(
@@ -1296,7 +1300,7 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
 #[cfg(feature = "playback")]
 fn repl_help() {
     println!(
-        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|texture|harmony|melody|ui|reverb LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
+        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|texture|harmony|melody|ui|reverb LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
     );
 }
 

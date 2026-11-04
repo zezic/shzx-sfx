@@ -309,7 +309,11 @@ impl App {
                 Control::EventIntensity,
                 Control::Trigger,
                 Control::Inspect,
-            ],
+                Control::AuditionAll,
+            ]
+            .into_iter()
+            .chain(SfxLayer::ALL.map(Control::AuditionLayer))
+            .collect(),
             Tab::Monitor => Vec::new(),
             Tab::Inspect => [Control::AuditionAll]
                 .into_iter()
@@ -729,10 +733,7 @@ impl App {
                 .expect("effect palette is populated");
                 self.focus = Control::SelectEffect(self.effect);
             }
-            KeyCode::Char(' ') if self.tab == Tab::Sfx => {
-                self.fire(self.effect, send);
-            }
-            KeyCode::Char(' ') if self.tab == Tab::Inspect => {
+            KeyCode::Char(' ') if matches!(self.tab, Tab::Sfx | Tab::Inspect) => {
                 return self.activate(
                     match self.focus {
                         Control::AuditionLayer(layer) => Control::AuditionLayer(layer),

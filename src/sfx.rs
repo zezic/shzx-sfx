@@ -1,7 +1,7 @@
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use crate::dsp::{HighPass, LowPass, SineTable};
-use crate::{GeneratedEvent, SfxEvent, SfxKind, SfxLayerSelection, SpatialMode};
+use crate::{GeneratedEvent, SFX_EQ, SfxEq, SfxEvent, SfxKind, SfxLayerSelection, SpatialMode};
 
 /// Independently auditable components of an event voice.
 #[derive(
@@ -24,15 +24,17 @@ pub enum SfxLayer {
     Tonal,
     Flecks,
     Shimmer,
+    Crisp,
 }
 
 impl SfxLayer {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Body,
         Self::Texture,
         Self::Tonal,
         Self::Flecks,
         Self::Shimmer,
+        Self::Crisp,
     ];
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -42,6 +44,7 @@ impl SfxLayer {
             Self::Tonal => "Tonal",
             Self::Flecks => "Flecks",
             Self::Shimmer => "Shimmer",
+            Self::Crisp => "Crisp",
         }
     }
 }
@@ -55,6 +58,7 @@ pub enum SfxGenerator {
     TonalSequence,
     FilteredNoise,
     PhaseTone,
+    HighIntermodulation,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -77,6 +81,15 @@ pub enum SfxModulation {
     Phase {
         index: f32,
         rate_hz: f32,
+    },
+    WideIntermodulation {
+        low_hz: [f32; 2],
+        high_hz: [f32; 2],
+        auxiliary_ratio: f32,
+        pm_cycles: [f32; 3],
+        noise_blend: [f32; 3],
+        noise_lowpass_hz: f32,
+        ratchet_hz: f32,
     },
 }
 
@@ -103,6 +116,28 @@ impl std::fmt::Display for SfxModulation {
                 write!(f, "low-index FM {index:.2}, modulator {ratio:.2}x")
             }
             Self::Phase { index, rate_hz } => write!(f, "PM {index:.3} cycles at {rate_hz:.2} Hz"),
+            Self::WideIntermodulation {
+                low_hz,
+                high_hz,
+                auxiliary_ratio,
+                pm_cycles,
+                noise_blend,
+                noise_lowpass_hz,
+                ratchet_hz,
+            } => write!(
+                f,
+                "wide PM/ring: low {:.0}>{:.0} Hz, high {:.0}>{:.0} Hz, aux {auxiliary_ratio:.2}x; PM {:.2}>{:.2}>{:.2} cycles; noise {:.2}>{:.2}>{:.2} via LP {noise_lowpass_hz:.0} Hz; accents {ratchet_hz:.0} Hz",
+                low_hz[0],
+                low_hz[1],
+                high_hz[0],
+                high_hz[1],
+                pm_cycles[0],
+                pm_cycles[1],
+                pm_cycles[2],
+                noise_blend[0],
+                noise_blend[1],
+                noise_blend[2]
+            ),
         }
     }
 }
@@ -168,6 +203,7 @@ pub struct SfxRecipe {
     pub pitch_hz: f32,
     pub duration_seconds: f32,
     pub gain: f32,
+    pub eq: SfxEq,
     pub envelope: SfxEnvelope,
     pub pitch: SfxPitch,
     pub phrase: &'static [SfxStep],
@@ -178,7 +214,7 @@ pub struct SfxRecipe {
     pub tonal_base_hz: f32,
     pub filter_gesture: SfxFilterGesture,
     pub fleck_bursts: &'static [SfxBurst],
-    pub layers: [SfxLayerRecipe; 5],
+    pub layers: [SfxLayerRecipe; 6],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -324,6 +360,58 @@ impl std::fmt::Display for SfxPatch {
 }
 
 impl SfxPatch {
+    fn crisp(self) -> CrispParameters {
+        let (low_hz, high_hz, pm_cycles, noise_blend, noise_lowpass_hz, ratchet_hz, level) =
+            match self {
+                Self::Contact { .. } => (
+                    [92.0, 210.0],
+                    [8_300.0, 11_300.0],
+                    [0.32, 0.12, 0.025],
+                    [0.06, 0.27, 0.035],
+                    800.0,
+                    360.0,
+                    0.055,
+                ),
+                Self::Digital { .. } => (
+                    [145.0, 85.0],
+                    [12_100.0, 7_600.0],
+                    [0.24, 0.42, 0.04],
+                    [0.18, 0.36, 0.035],
+                    1_100.0,
+                    470.0,
+                    0.045,
+                ),
+                Self::Servo { .. } => (
+                    [74.0, 235.0],
+                    [7_600.0, 12_600.0],
+                    [0.14, 0.34, 0.06],
+                    [0.04, 0.33, 0.08],
+                    650.0,
+                    290.0,
+                    0.060,
+                ),
+                Self::Air => (
+                    [115.0, 175.0],
+                    [10_800.0, 8_100.0],
+                    [0.12, 0.24, 0.02],
+                    [0.25, 0.40, 0.08],
+                    1_250.0,
+                    620.0,
+                    0.035,
+                ),
+            };
+        CrispParameters {
+            low_hz,
+            high_hz,
+            auxiliary_ratio: 1.31,
+            pm_cycles,
+            noise_blend,
+            noise_lowpass_hz,
+            ratchet_hz,
+            level,
+        }
+    }
+
     fn details(self) -> &'static [SfxDetail; 6] {
         use SfxDetail::*;
         match self {
@@ -766,12 +854,29 @@ impl Recipe {
             | Notification | Connect | Disconnect | DialogOpen | DialogClose => 1.0,
             _ => 0.65,
         };
+        recipe.amplitude = match kind {
+            Click => AmplitudeEnvelope::new(0.00025, 0.008, 0.055, 0.004),
+            SecondaryClick => AmplitudeEnvelope::new(0.0003, 0.010, 0.045, 0.0045),
+            DestructiveClick | Drop => AmplitudeEnvelope::new(0.0003, 0.009, 0.075, 0.004),
+            Scroll => AmplitudeEnvelope::new(0.0002, 0.0045, 0.035, 0.0025),
+            ScrollBoundary | ScrollbarGrab | ScrollbarRelease => {
+                AmplitudeEnvelope::new(0.00025, 0.0065, 0.060, 0.0035)
+            }
+            ToggleOn | ToggleOff | DragStart | DragOver | Resize => {
+                AmplitudeEnvelope::new(0.0004, 0.008, 0.080, 0.004)
+            }
+            HoverEnter | HoverLeave | Blur => AmplitudeEnvelope::new(0.0005, 0.0075, 0.075, 0.0035),
+            TabOpen | TabClose | Search | DataRefresh => {
+                AmplitudeEnvelope::new(0.0005, 0.009, 0.12, 0.004)
+            }
+            _ => recipe.amplitude,
+        };
         recipe
     }
 }
 
 impl Recipe {
-    fn layers(self) -> [SfxLayerRecipe; 5] {
+    fn layers(self) -> [SfxLayerRecipe; 6] {
         let (lp, hp) = self.articulation.filter.cutoffs(0.0, self.cutoff);
         let shortest_part = self
             .steps
@@ -780,6 +885,7 @@ impl Recipe {
             .fold(self.duration, f32::min);
         let shimmer_ms = (shortest_part * 550.0).clamp(6.0, 72.0);
         let ratios = self.patch.ratios();
+        let crisp = self.patch.crisp();
         [
             SfxLayerRecipe {
                 layer: SfxLayer::Body,
@@ -872,6 +978,28 @@ impl Recipe {
                     rate_hz: SHIMMER_MOD_HZ,
                 }),
             },
+            SfxLayerRecipe {
+                layer: SfxLayer::Crisp,
+                level: crisp.level,
+                highpass_hz: 6_000.0,
+                lowpass_hz: 16_000.0,
+                carrier_hz: Some(crisp.high_hz[0]),
+                attack_ms: 0.35,
+                release_ms: 2.0,
+                start_ms: 0.0,
+                duration_ms: (shortest_part * 750.0).clamp(6.0, 90.0),
+                minimum_sample_rate: 20_000,
+                generator: SfxGenerator::HighIntermodulation,
+                modulation: Some(SfxModulation::WideIntermodulation {
+                    low_hz: crisp.low_hz,
+                    high_hz: crisp.high_hz,
+                    auxiliary_ratio: crisp.auxiliary_ratio,
+                    pm_cycles: crisp.pm_cycles,
+                    noise_blend: crisp.noise_blend,
+                    noise_lowpass_hz: crisp.noise_lowpass_hz,
+                    ratchet_hz: crisp.ratchet_hz,
+                }),
+            },
         ]
     }
 }
@@ -886,6 +1014,7 @@ impl SfxKind {
             pitch_hz: recipe.pitch_hz,
             duration_seconds: recipe.duration,
             gain: recipe.gain,
+            eq: SFX_EQ,
             envelope: SfxEnvelope {
                 attack_ms: recipe.amplitude.attack * 1000.0,
                 decay_ms: recipe.amplitude.decay * 1000.0,
@@ -1158,6 +1287,126 @@ struct BrightDetail {
     level: f32,
 }
 
+#[derive(Clone, Copy)]
+struct CrispParameters {
+    low_hz: [f32; 2],
+    high_hz: [f32; 2],
+    auxiliary_ratio: f32,
+    pm_cycles: [f32; 3],
+    noise_blend: [f32; 3],
+    noise_lowpass_hz: f32,
+    ratchet_hz: f32,
+    level: f32,
+}
+
+fn parameter_contour(values: [f32; 3], progress: f32) -> f32 {
+    let (from, to, position) = if progress < 0.22 {
+        (values[0], values[1], progress / 0.22)
+    } else {
+        (values[1], values[2], (progress - 0.22) / 0.78)
+    };
+    let smooth = position * position * (3.0 - 2.0 * position);
+    from + (to - from) * smooth
+}
+
+struct CrispState {
+    phase: [f32; 3],
+    noise: LowPass,
+    rng: fastrand::Rng,
+}
+
+impl CrispState {
+    fn new(rate: f32, parameters: CrispParameters, seed: u64) -> Self {
+        let mut rng = fastrand::Rng::with_seed(seed);
+        Self {
+            phase: std::array::from_fn(|_| rng.f32()),
+            noise: LowPass::new(rate, parameters.noise_lowpass_hz),
+            rng,
+        }
+    }
+
+    fn tick(
+        &mut self,
+        time: f32,
+        duration: f32,
+        rate: f32,
+        parameters: CrispParameters,
+        table: &SineTable,
+    ) -> f32 {
+        let progress = (time / duration).clamp(0.0, 1.0);
+        let sweep = progress * progress * (3.0 - 2.0 * progress);
+        let low_hz = parameters.low_hz[0] + (parameters.low_hz[1] - parameters.low_hz[0]) * sweep;
+        let high_hz = (parameters.high_hz[0]
+            + (parameters.high_hz[1] - parameters.high_hz[0]) * (1.0 - (1.0 - progress).powi(3)))
+        .min(rate * 0.35);
+        let auxiliary_hz = (high_hz * parameters.auxiliary_ratio).min(rate * 0.37);
+        for (phase, hz) in self.phase.iter_mut().zip([low_hz, high_hz, auxiliary_hz]) {
+            *phase = (*phase + hz / rate).fract();
+        }
+        let low = table.at(self.phase[0]);
+        let colored = self.noise.tick(self.rng.f32() * 2.0 - 1.0);
+        let depth = parameter_contour(parameters.pm_cycles, progress);
+        let blend = parameter_contour(parameters.noise_blend, progress);
+        let high = table.at((self.phase[1] + low * depth + colored * blend + 1.0).fract());
+        let auxiliary =
+            table.at((self.phase[2] - low * depth * 0.37 - colored * blend * 0.5 + 1.0).fract());
+        let ring = high * low;
+        let complex = high * 0.48 + ring * 0.33 + auxiliary * low * low * 0.19;
+        let attack = (time / 0.00035).min(1.0);
+        let release = ((duration - time) / 0.002).min(1.0);
+        let front = 0.2 + 0.8 * (1.0 - (time / 0.005).min(1.0)).powi(2);
+        let ratchet = (1.0 - (time * parameters.ratchet_hz).fract() * 3.5).max(0.0);
+        complex * attack * release * (front + ratchet * (0.38 - progress * 0.28))
+    }
+}
+
+struct CrispDetail {
+    states: [CrispState; 3],
+    parameters: CrispParameters,
+    profile: SfxLayerRecipe,
+    highpass: [HighPass; 2],
+    lowpass: LowPass,
+    rate: f32,
+}
+
+impl CrispDetail {
+    fn new(rate: f32, profile: SfxLayerRecipe, parameters: CrispParameters, seed: u64) -> Self {
+        Self {
+            states: std::array::from_fn(|index| {
+                CrispState::new(
+                    rate,
+                    parameters,
+                    seed ^ (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                )
+            }),
+            parameters,
+            profile,
+            highpass: std::array::from_fn(|_| {
+                HighPass::new(rate, profile.highpass_hz.min(rate * 0.35))
+            }),
+            lowpass: LowPass::new(rate, profile.lowpass_hz.min(rate * 0.45)),
+            rate,
+        }
+    }
+
+    fn part(&mut self, index: usize, time: f32, table: &SineTable) -> f32 {
+        if self.rate < self.profile.minimum_sample_rate as f32 {
+            return 0.0;
+        }
+        let age = time - self.profile.start_ms * 0.001;
+        let duration = self.profile.duration_ms * 0.001;
+        if !(0.0..duration).contains(&age) {
+            return 0.0;
+        }
+        self.states[index].tick(age, duration, self.rate, self.parameters, table)
+    }
+
+    fn filter(&mut self, input: f32) -> f32 {
+        let input = self.highpass[0].tick(input);
+        self.lowpass.tick(self.highpass[1].tick(input)) * self.profile.level
+    }
+}
+
 impl BrightDetail {
     fn new(sample_rate: f32, profile: SfxLayerRecipe, seed: u64) -> Self {
         let mut rng = fastrand::Rng::with_seed(seed);
@@ -1196,17 +1445,19 @@ struct LayerProfiles {
     tonal: SfxLayerRecipe,
     flecks: SfxLayerRecipe,
     shimmer: SfxLayerRecipe,
+    crisp: SfxLayerRecipe,
 }
 
-impl From<[SfxLayerRecipe; 5]> for LayerProfiles {
-    fn from(profiles: [SfxLayerRecipe; 5]) -> Self {
-        let [body, texture, tonal, flecks, shimmer] = profiles;
+impl From<[SfxLayerRecipe; 6]> for LayerProfiles {
+    fn from(profiles: [SfxLayerRecipe; 6]) -> Self {
+        let [body, texture, tonal, flecks, shimmer, crisp] = profiles;
         Self {
             body,
             texture,
             tonal,
             flecks,
             shimmer,
+            crisp,
         }
     }
 }
@@ -1217,13 +1468,14 @@ struct LayerSamples {
     tonal: f32,
     flecks: f32,
     shimmer: f32,
+    crisp: f32,
 }
 
 impl LayerSamples {
     fn select(self, selection: SfxLayerSelection) -> f32 {
         match selection {
             SfxLayerSelection::All => {
-                self.body + self.texture + self.tonal + self.flecks + self.shimmer
+                self.body + self.texture + self.tonal + self.flecks + self.shimmer + self.crisp
             }
             SfxLayerSelection::Only(layer) => match layer {
                 SfxLayer::Body => self.body,
@@ -1231,6 +1483,7 @@ impl LayerSamples {
                 SfxLayer::Tonal => self.tonal,
                 SfxLayer::Flecks => self.flecks,
                 SfxLayer::Shimmer => self.shimmer,
+                SfxLayer::Crisp => self.crisp,
             },
         }
     }
@@ -1256,6 +1509,7 @@ struct Voice {
     tonal_filter: BandFilter,
     shimmer_filter: BandFilter,
     bright: BrightDetail,
+    crisp: CrispDetail,
     layers: SfxLayerSelection,
     profiles: LayerProfiles,
     base_cutoff: f32,
@@ -1280,6 +1534,12 @@ impl Voice {
         let steps = std::array::from_fn(|_| StepState::new(&mut rng));
         let profiles = LayerProfiles::from(recipe.layers());
         let bright = BrightDetail::new(sample_rate, profiles.flecks, rng.u64(..));
+        let crisp = CrispDetail::new(
+            sample_rate,
+            profiles.crisp,
+            recipe.patch.crisp(),
+            seed ^ 0x4352_4953_505f_4846,
+        );
         let voice = Self {
             recipe,
             pitch_hz,
@@ -1308,6 +1568,7 @@ impl Voice {
                 profiles.shimmer.lowpass_hz,
             ),
             bright,
+            crisp,
             layers: event.layers,
             profiles,
             base_cutoff,
@@ -1335,9 +1596,10 @@ impl Voice {
             tonal: 0.0,
         };
         let mut shimmer = 0.0;
+        let mut crisp = 0.0;
         let mut bright_envelope = 0.0;
         let mut filter_time = None;
-        for (step, state) in self.recipe.steps.iter().zip(&mut self.steps) {
+        for (index, (step, state)) in self.recipe.steps.iter().zip(&mut self.steps).enumerate() {
             let local_time = time - step.start_fraction * self.duration;
             let duration = self.duration * step.length_fraction;
             if (0.0..duration).contains(&local_time) {
@@ -1362,6 +1624,7 @@ impl Voice {
                     self.sample_rate,
                     table,
                 ) * step.level;
+                crisp += self.crisp.part(index, local_time, table) * step.level;
                 bright_envelope +=
                     self.recipe.articulation.flecks.envelope(local_time) * step.level;
                 filter_time = Some(local_time);
@@ -1387,6 +1650,7 @@ impl Voice {
             tonal: self.tonal_filter.tick(parts.tonal * self.level) * self.profiles.tonal.level,
             flecks: self.bright.tick(bright_envelope) * self.level,
             shimmer: self.shimmer_filter.tick(shimmer * self.level) * self.profiles.shimmer.level,
+            crisp: self.crisp.filter(crisp * self.level),
         }
         .select(self.layers)
     }
@@ -1612,9 +1876,114 @@ impl SfxBank {
 mod tests {
     use super::*;
     use crate::{Pan, Unit};
+    use fundsp::{fft::real_fft, hacker32::Complex32};
     use strum::IntoEnumIterator;
 
     const SAMPLE_RATE: u32 = 48_000;
+
+    fn render_component(kind: SfxKind, layer: SfxLayer, rate: u32) -> Vec<[f32; 2]> {
+        let mut bank = SfxBank::new(rate, 1, 71, SpatialMode::Pan);
+        let event = bank
+            .trigger(SfxEvent {
+                layers: SfxLayerSelection::Only(layer),
+                ..SfxEvent::new(kind)
+            })
+            .unwrap();
+        (0..(event.duration_seconds * rate as f32).ceil() as usize + 1)
+            .map(|_| bank.tick())
+            .collect()
+    }
+
+    fn energy(frames: &[[f32; 2]]) -> f64 {
+        frames
+            .iter()
+            .flatten()
+            .map(|&value| f64::from(value).powi(2))
+            .sum()
+    }
+
+    fn spectrum(frames: &[[f32; 2]], rate: u32) -> (f64, f64) {
+        const LENGTH: usize = 512;
+        let mut input = [0.0_f32; LENGTH];
+        let mut output = [Complex32::new(0.0, 0.0); LENGTH / 2 + 1];
+        let mut total = 0.0;
+        let mut above = 0.0;
+        let mut weighted = 0.0;
+        for frames in frames.windows(LENGTH).step_by(LENGTH / 4) {
+            for (index, (frame, input)) in frames.iter().zip(&mut input).enumerate() {
+                let hann = 0.5 - 0.5 * (TAU * index as f32 / (LENGTH - 1) as f32).cos();
+                *input = frame[0] * hann;
+            }
+            real_fft(&input, &mut output);
+            for (index, bin) in output.iter().enumerate() {
+                let hz = index as f64 * rate as f64 / LENGTH as f64;
+                let power = bin.norm_sqr() as f64;
+                total += power;
+                weighted += power * hz;
+                if hz >= 6_000.0 {
+                    above += power;
+                }
+            }
+        }
+        assert!(total > 0.0);
+        (above / total, weighted / total)
+    }
+
+    #[test]
+    fn crisp_intermodulation_stays_high_quiet_and_unavailable_at_low_rates() {
+        let crisp = render_component(SfxKind::OrderFill, SfxLayer::Crisp, SAMPLE_RATE);
+        let tonal = render_component(SfxKind::OrderFill, SfxLayer::Tonal, SAMPLE_RATE);
+        let (share, _) = spectrum(&crisp, SAMPLE_RATE);
+        assert!(
+            share > 0.92,
+            "crisp detail leaked into the body band: {share}"
+        );
+        assert!(energy(&crisp) > 0.000001);
+        assert!(
+            energy(&crisp) < energy(&tonal) * 0.20,
+            "high-band fill must remain subordinate"
+        );
+        assert_eq!(
+            energy(&render_component(
+                SfxKind::OrderFill,
+                SfxLayer::Crisp,
+                8_000
+            )),
+            0.0
+        );
+        for rate in [20_000, 44_100, 192_000] {
+            assert!(
+                render_component(SfxKind::Confirm, SfxLayer::Crisp, rate)
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_finite())
+            );
+        }
+    }
+
+    #[test]
+    fn crisp_parameter_contours_change_the_high_band_during_a_part() {
+        let crisp = render_component(SfxKind::OrderFill, SfxLayer::Crisp, SAMPLE_RATE);
+        let (_, first) = spectrum(&crisp[48..720], SAMPLE_RATE);
+        let (_, late) = spectrum(&crisp[2_880..4_128], SAMPLE_RATE);
+        assert!(
+            first > late + 1_000.0,
+            "carrier/depth/noise envelopes should reshape the high band: {first} -> {late}"
+        );
+    }
+
+    #[test]
+    fn sharp_click_body_decays_to_a_low_tail_instead_of_a_flat_plateau() {
+        for kind in [SfxKind::Click, SfxKind::SecondaryClick] {
+            let body = render_component(kind, SfxLayer::Body, SAMPLE_RATE);
+            let front = energy(&body[48..240]) / (240 - 48) as f64;
+            let tail = energy(&body[960..1_440]) / (1_440 - 960) as f64;
+            assert!(
+                tail < front * 0.12,
+                "{kind}: short click should fall below its initial body: {tail} / {front}"
+            );
+        }
+    }
 
     fn bank(seed: u64, max_voices: usize, spatial: SpatialMode) -> SfxBank {
         SfxBank::new(SAMPLE_RATE, max_voices, seed, spatial)

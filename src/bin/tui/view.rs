@@ -8,8 +8,9 @@ use ratatui::{
 };
 use shzx_sfx::{
     AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState, DelaySnapshot,
-    GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer, SfxLayerRecipe,
-    SfxLayerSelection, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend, Unit,
+    GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxGenerator, SfxKind, SfxLayer,
+    SfxLayerRecipe, SfxLayerSelection, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend,
+    Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -87,7 +88,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App) -> HitMap {
             app,
             &mut hits,
         );
-        if app.tab == Tab::Monitor {
+        if app.tab == Tab::Sfx {
+            effects(
+                frame,
+                Rect::new(area.x, area.y + 4, area.width, area.height - 7),
+                app,
+                &mut hits,
+            );
+        } else if app.tab == Tab::Monitor {
             monitor(
                 frame,
                 Rect::new(area.x, area.y + 4, area.width, area.height - 11),
@@ -588,116 +596,137 @@ fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
 }
 
 fn effects(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
-    let list_width = (area.width * 2 / 5).clamp(27, 36);
+    let palette_width = (area.width / 3).clamp(28, 48);
+    effect_browser(
+        frame,
+        Rect::new(area.x, area.y, palette_width, area.height),
+        app,
+        hits,
+    );
+    inspector(
+        frame,
+        Rect::new(
+            area.x + palette_width + 1,
+            area.y,
+            area.width - palette_width - 1,
+            area.height,
+        ),
+        app,
+        hits,
+    );
+}
+
+fn effect_browser(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let selected = SfxKind::iter()
         .position(|kind| kind == app.effect)
         .expect("effect belongs to the palette");
     let total = SfxKind::iter().count();
-    let list = panel(
+    let inner = panel(
         frame,
-        Rect::new(area.x, area.y, list_width, area.height),
+        area,
         format!(" PALETTE / {} of {total} ", selected + 1),
     );
-    let visible = list.height as usize;
+    let visible = inner.height.saturating_sub(3) as usize;
     let start = selected
         .saturating_sub(visible / 2)
         .min(total.saturating_sub(visible));
     for (index, kind) in SfxKind::iter().skip(start).take(visible).enumerate() {
-        let rectangle = Rect::new(list.x, list.y + index as u16, list.width, 1);
-        let focused = app.focus == Control::SelectEffect(kind);
-        let current = kind == app.effect;
+        let rectangle = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
         let style = Style::default()
-            .fg(if current { CYAN } else { TEXT })
-            .bg(if focused { FOCUSED } else { PANEL });
+            .fg(if kind == app.effect { CYAN } else { TEXT })
+            .bg(if app.focus == Control::SelectEffect(kind) {
+                FOCUSED
+            } else {
+                PANEL
+            });
         frame.render_widget(
-            Paragraph::new(format!("{} {kind}", if current { ">" } else { " " })).style(style),
+            Paragraph::new(format!(
+                "{} {kind}",
+                if kind == app.effect { ">" } else { " " }
+            ))
+            .style(style),
             rectangle,
         );
         hits.add(rectangle, Control::SelectEffect(kind));
     }
-    let inner = panel(
+    compact_slider(
         frame,
-        Rect::new(
-            area.x + list_width + 1,
-            area.y,
-            area.width - list_width - 1,
-            area.height,
-        ),
-        " AUDITION / Event controls ",
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{}", app.effect))
-            .style(Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(17), 1),
-    );
-    let inspect = Rect::new(inner.right() - 14, inner.y, 14, 1);
-    frame.render_widget(
-        Paragraph::new("[ Inspect (i) ]").style(Style::default().fg(CYAN).bg(
-            if app.focus == Control::Inspect {
-                FOCUSED
-            } else {
-                PANEL
-            },
-        )),
-        inspect,
-    );
-    hits.add(inspect, Control::Inspect);
-    let recipe = app.effect.recipe();
-    let layer_level = |kind| {
-        recipe
-            .layers
-            .iter()
-            .find(|layer| layer.layer == kind)
-            .expect("recipe contains every source layer")
-            .level
-    };
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Texture {}dB | tonal {}dB",
-            db(layer_level(SfxLayer::Texture)),
-            db(layer_level(SfxLayer::Tonal))
-        ))
-        .style(Style::default().fg(DIM)),
-        Rect::new(inner.x + 1, inner.y + 1, inner.width - 2, 1),
-    );
-    slider(
-        frame,
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
-        "Screen pan",
+        Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
+        "Pan",
         SliderValue::pan(app.event_pan),
         Control::EventPan,
         app,
         hits,
     );
-    slider(
+    compact_slider(
         frame,
-        Rect::new(inner.x, inner.y + 4, inner.width, 1),
-        "Intensity",
+        Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+        "Level",
         SliderValue::percent(app.event_intensity),
         Control::EventIntensity,
         app,
         hits,
     );
-    button(
-        frame,
-        Rect::new(inner.x + 1, inner.y + 6, inner.width - 2, 3),
-        "PLAY / Space",
-        Control::Trigger,
-        false,
-        app,
-        hits,
-    );
-    if inner.height >= 11 {
-        frame.render_widget(Paragraph::new("Click a sound to play; I inspects its layers.\nSpace / PLAY replays a fresh variation.").style(Style::default().fg(DIM)).wrap(Wrap { trim: true }), Rect::new(inner.x + 1, inner.y + 9, inner.width - 2, 2));
+    let actions = buttons::<2>(Rect::new(inner.x, inner.bottom() - 1, inner.width, 1));
+    for (rectangle, label, control) in [
+        (actions[0], "[ Play ]", Control::Trigger),
+        (actions[1], "[ Expand i ]", Control::Inspect),
+    ] {
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(CYAN).bg(if app.focus == control {
+                FOCUSED
+            } else {
+                PANEL
+            })),
+            rectangle,
+        );
+        hits.add(rectangle, control);
     }
+}
+
+fn compact_slider(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: SliderValue,
+    control: Control,
+    app: &App,
+    hits: &mut HitMap,
+) {
+    let bar_width = area.width.saturating_sub(14);
+    let filled = (value.position.clamp(0.0, 1.0) * bar_width as f32).round() as usize;
+    let bar = format!(
+        "{}{}",
+        "#".repeat(filled),
+        "-".repeat(bar_width as usize - filled)
+    );
+    let style = Style::default()
+        .fg(if app.focus == control { CYAN } else { TEXT })
+        .bg(if app.focus == control { FOCUSED } else { PANEL });
+    frame.render_widget(
+        Paragraph::new(format!("{label:<5} [{bar}] {:>5}", value.display)).style(style),
+        area,
+    );
+    hits.add(Rect::new(area.x + 7, area.y, bar_width, 1), control);
 }
 
 fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let recipe = app.effect.recipe();
+    let compact = area.width < 72;
     let inner = panel(
         frame,
         area,
-        format!(" BUILD / {} / Nominal recipe ", app.effect),
+        if compact {
+            format!(" BUILD / {} / Nominal ", app.effect)
+        } else {
+            format!(
+                " BUILD / {} / Nominal / EQ{} {:.0}dB Q{:.2} ",
+                app.effect,
+                compact_hz(recipe.eq.center_hz),
+                recipe.eq.gain_db,
+                recipe.eq.q
+            )
+        },
     );
     let play_all = Rect::new(inner.right() - 13, inner.y, 13, 1);
     let recent = app
@@ -708,12 +737,21 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             SfxLayerSelection::All => "all",
             SfxLayerSelection::Only(layer) => layer.label(),
         });
-    let mut summary = format!(
-        "{} | {:.0}Hz/{:.0}ms",
-        recipe.patch,
-        recipe.pitch_hz,
-        recipe.duration_seconds * 1000.0
-    );
+    let mut summary = if compact {
+        format!(
+            "EQ{} {:.0}dB Q{:.2} | dB HP/LP",
+            compact_hz(recipe.eq.center_hz),
+            recipe.eq.gain_db,
+            recipe.eq.q
+        )
+    } else {
+        format!(
+            "{} | {:.0}Hz/{:.0}ms",
+            recipe.patch,
+            recipe.pitch_hz,
+            recipe.duration_seconds * 1000.0
+        )
+    };
     if let Some(layer) = recent {
         let last = format!(" | last {layer}");
         if summary.len() + last.len() <= usize::from(inner.width.saturating_sub(14)) {
@@ -739,14 +777,6 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     for (index, layer) in recipe.layers.iter().enumerate() {
         let control = Control::AuditionLayer(layer.layer);
         let selected = app.inspector_layer == layer.layer;
-        let focused = app.focus == control;
-        let color = if selected {
-            CYAN
-        } else if layer.layer == SfxLayer::Texture {
-            AMBER
-        } else {
-            TEXT
-        };
         let available = app.output.sample_rate >= layer.minimum_sample_rate;
         let timing = if available {
             format!("{:.0}+{:.0}ms", layer.start_ms, layer.duration_ms)
@@ -754,8 +784,18 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             format!("needs {}kHz", layer.minimum_sample_rate / 1000)
         };
         let row = Rect::new(inner.x, inner.y + index as u16 + 1, inner.width, 1);
-        frame.render_widget(
-            Paragraph::new(format!(
+        let text = if compact {
+            format!(
+                "{} {:<7} {:>5}dB {:<8} {:>4}/{:<4} {timing}",
+                if selected { ">" } else { " " },
+                layer.layer.label(),
+                db(layer.level),
+                generator_short(layer.generator),
+                compact_hz(layer.highpass_hz),
+                compact_hz(layer.lowpass_hz)
+            )
+        } else {
+            format!(
                 "{} {:<7} {:>6}dB {:<15} HP {:>5} LP {:>5} {timing}",
                 if selected { ">" } else { " " },
                 layer.layer.label(),
@@ -763,12 +803,20 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
                 layer.generator,
                 compact_hz(layer.highpass_hz),
                 compact_hz(layer.lowpass_hz)
-            ))
-            .style(Style::default().fg(color).bg(if focused {
-                FOCUSED
-            } else {
-                PANEL
-            })),
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if selected {
+                        CYAN
+                    } else if layer.layer == SfxLayer::Texture {
+                        AMBER
+                    } else {
+                        TEXT
+                    })
+                    .bg(if app.focus == control { FOCUSED } else { PANEL }),
+            ),
             row,
         );
         hits.add(row, control);
@@ -789,24 +837,6 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             )
         },
         |modulation| format!("{}: {modulation}", selected.layer.label()),
-    );
-    let carrier = selected
-        .carrier_hz
-        .map_or_else(String::new, |hz| format!(" @{}Hz", compact_hz(hz)));
-    let window = format!(
-        "{}{} | {} {:.1}+{:.1}ms | A{:.2}/R{:.2}ms | {}",
-        selected.layer.label(),
-        carrier,
-        match selected.layer {
-            SfxLayer::Body | SfxLayer::Texture => "event",
-            SfxLayer::Tonal => "one slot",
-            SfxLayer::Flecks | SfxLayer::Shimmer => "per-part",
-        },
-        selected.start_ms,
-        selected.duration_ms,
-        selected.attack_ms,
-        selected.release_ms,
-        recipe.filter_gesture
     );
     let summary = selected.modulation.map_or_else(
         || source.clone(),
@@ -829,53 +859,97 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     } else {
         summary
     };
+    let carrier = selected
+        .carrier_hz
+        .map_or_else(String::new, |hz| format!(" @{}Hz", compact_hz(hz)));
+    let scope = match selected.layer {
+        SfxLayer::Body | SfxLayer::Texture => "event",
+        SfxLayer::Tonal => "one slot",
+        SfxLayer::Flecks | SfxLayer::Shimmer | SfxLayer::Crisp => "per-part",
+    };
+    let window = format!(
+        "{}{} | {scope} {:.1}+{:.1}ms | A{:.2}/R{:.2}ms | {}",
+        selected.layer.label(),
+        carrier,
+        selected.start_ms,
+        selected.duration_ms,
+        selected.attack_ms,
+        selected.release_ms,
+        recipe.filter_gesture
+    );
+    let detail_offset = 1 + recipe.layers.len() as u16;
+    let room = inner.height.saturating_sub(detail_offset);
+    let detail_y = inner.y + detail_offset;
+    if room == 0 {
+        return;
+    }
     frame.render_widget(
         Paragraph::new(compact_source).style(Style::default().fg(AMBER)),
-        Rect::new(inner.x, inner.y + 6, inner.width, 1),
+        Rect::new(inner.x, detail_y, inner.width, 1),
     );
-    frame.render_widget(
-        Paragraph::new(window).style(Style::default().fg(DIM)),
-        Rect::new(inner.x, inner.y + 7, inner.width, 1),
-    );
-    frame.render_widget(
-        Paragraph::new(sequence_text(&recipe, selected, inner.width)),
-        Rect::new(inner.x, inner.y + 8, inner.width, 1),
-    );
-
-    if inner.height > 9 {
+    if room == 2 {
+        let window = format!(
+            "{}{} {scope} {:.0}ms A{:.2}/R{:.2}",
+            selected.layer.label(),
+            carrier,
+            selected.duration_ms,
+            selected.attack_ms,
+            selected.release_ms,
+        );
+        let sequence_width = inner.width.saturating_sub(window.len() as u16 + 3);
+        let brief = format!(
+            "{window} | {}",
+            sequence_text(&recipe, selected, sequence_width)
+        );
+        frame.render_widget(
+            Paragraph::new(brief).style(Style::default().fg(DIM)),
+            Rect::new(inner.x, detail_y + 1, inner.width, 1),
+        );
+        return;
+    }
+    if room > 1 {
+        frame.render_widget(
+            Paragraph::new(window).style(Style::default().fg(DIM)),
+            Rect::new(inner.x, detail_y + 1, inner.width, 1),
+        );
+    }
+    if room > 2 {
+        frame.render_widget(
+            Paragraph::new(sequence_text(&recipe, selected, inner.width)),
+            Rect::new(inner.x, detail_y + 2, inner.width, 1),
+        );
+    }
+    if room > 3 {
         let env = recipe.envelope;
         frame.render_widget(
             Paragraph::new(format!(
-                "Voice ADSR {:.2}/{:.1}/{:.0}%/{:.1} ms | gain {}dB | pitch {}",
+                "Voice ADSR {:.2}/{:.1}/{:.0}%/{:.1} ms | gain {}dB",
                 env.attack_ms,
                 env.decay_ms,
                 env.sustain * 100.0,
                 env.release_ms,
-                db(recipe.gain),
-                recipe.pitch
+                db(recipe.gain)
             ))
             .style(Style::default().fg(DIM)),
-            Rect::new(inner.x, inner.y + 9, inner.width, 1),
+            Rect::new(inner.x, detail_y + 3, inner.width, 1),
         );
     }
-    if inner.height > 10 {
+    if room > 4 {
         frame.render_widget(
             Paragraph::new(macro_text(&recipe)).style(Style::default().fg(DIM)),
-            Rect::new(inner.x, inner.y + 10, inner.width, 1),
+            Rect::new(inner.x, detail_y + 4, inner.width, 1),
         );
     }
-    if inner.height > 11 {
-        let source_rows = (source.len() as u16)
-            .div_ceil(inner.width)
-            .min(inner.height - 11);
+    if room > 5 {
+        let source_rows = (source.len() as u16).div_ceil(inner.width).min(room - 5);
         frame.render_widget(
             Paragraph::new(source)
                 .style(Style::default().fg(AMBER))
                 .wrap(Wrap { trim: true }),
-            Rect::new(inner.x, inner.y + 11, inner.width, source_rows),
+            Rect::new(inner.x, detail_y + 5, inner.width, source_rows),
         );
-        let note_row = 11 + source_rows;
-        frame.render_widget(Paragraph::new("Click/Enter a layer to hear its real mix level; Play all restores the whole sound.\nTexture contains the sustained nonlinear/noise path. Compare it with the filtered tonal layers.\nLayer dB is before event intensity and mixer. Pitch, duration and detail rate vary on each seeded playback.")
+        let note_row = detail_offset + 5 + source_rows;
+        frame.render_widget(Paragraph::new("Click/Enter solos at the real mix level. Play all restores the complete event.\nRecipe values are nominal; each playback chooses a new seeded variation.")
             .style(Style::default().fg(DIM)).wrap(Wrap { trim: true }),
             Rect::new(inner.x, inner.y + note_row, inner.width, inner.height.saturating_sub(note_row)));
     }
@@ -886,6 +960,17 @@ fn compact_hz(value: f32) -> String {
         format!("{:.1}k", value / 1000.0)
     } else {
         format!("{value:.0}")
+    }
+}
+
+fn generator_short(generator: SfxGenerator) -> &'static str {
+    match generator {
+        SfxGenerator::PulseBody => "pulse",
+        SfxGenerator::Intermodulation => "intermod",
+        SfxGenerator::TonalSequence => "FM steps",
+        SfxGenerator::FilteredNoise => "noise",
+        SfxGenerator::PhaseTone => "PM tone",
+        SfxGenerator::HighIntermodulation => "HF mix",
     }
 }
 
@@ -923,25 +1008,43 @@ fn macro_text(recipe: &SfxRecipe) -> String {
 }
 
 fn sequence_text(recipe: &SfxRecipe, layer: &SfxLayerRecipe, width: u16) -> String {
-    let sequence = if layer.layer == SfxLayer::Tonal {
-        let pitches = recipe
-            .tonal_pitch_ratios
-            .iter()
-            .map(|ratio| format!("{ratio:.2}x"))
-            .collect::<Vec<_>>()
-            .join("/");
-        format!("Tones {}Hz: {pitches}", compact_hz(recipe.tonal_base_hz))
-    } else {
-        let pattern = recipe
-            .micro_pattern
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("/");
-        format!(
-            "Micro {pattern} {:.0}-{:.0}Hz",
-            recipe.detail_rate_hz[0], recipe.detail_rate_hz[1]
-        )
+    let sequence = match layer.layer {
+        SfxLayer::Tonal => {
+            let pitches = recipe
+                .tonal_pitch_ratios
+                .iter()
+                .map(|ratio| format!("{ratio:.2}x"))
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("Tones {}Hz: {pitches}", compact_hz(recipe.tonal_base_hz))
+        }
+        SfxLayer::Texture => {
+            let pattern = recipe
+                .micro_pattern
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("/");
+            format!(
+                "Micro {pattern} {:.0}-{:.0}Hz",
+                recipe.detail_rate_hz[0], recipe.detail_rate_hz[1]
+            )
+        }
+        SfxLayer::Body => format!("Body pitch {}", recipe.pitch),
+        SfxLayer::Flecks => format!("{} timed fleck bursts per part", recipe.fleck_bursts.len()),
+        SfxLayer::Shimmer => {
+            let Some(SfxModulation::Phase { rate_hz, .. }) = layer.modulation else {
+                unreachable!("shimmer uses phase modulation")
+            };
+            format!("Phase tone {rate_hz:.2}Hz modulation")
+        }
+        SfxLayer::Crisp => {
+            let Some(SfxModulation::WideIntermodulation { ratchet_hz, .. }) = layer.modulation
+            else {
+                unreachable!("crisp uses a wide intermodulation gesture")
+            };
+            format!("Spectral envelope | accents {ratchet_hz:.0}Hz")
+        }
     };
     let macro_steps = recipe
         .phrase
@@ -955,12 +1058,27 @@ fn sequence_text(recipe: &SfxRecipe, layer: &SfxLayerRecipe, width: u16) -> Stri
         })
         .collect::<Vec<_>>()
         .join("/");
-    let combined = format!("{sequence} | M {macro_steps}");
-    if combined.len() <= usize::from(width) {
-        combined
-    } else {
-        format!("{sequence} | {} macro steps", recipe.phrase.len())
+    let full = format!("{sequence} | M {macro_steps}");
+    if full.len() <= usize::from(width) {
+        return full;
     }
+    let short = match layer.layer {
+        SfxLayer::Texture => format!(
+            "Micro {} slots {:.0}-{:.0}Hz | M{}",
+            recipe.micro_pattern.len(),
+            recipe.detail_rate_hz[0],
+            recipe.detail_rate_hz[1],
+            recipe.phrase.len()
+        ),
+        SfxLayer::Tonal => format!(
+            "Tones {}Hz, {} slots | M{}",
+            compact_hz(recipe.tonal_base_hz),
+            recipe.tonal_pitch_ratios.len(),
+            recipe.phrase.len()
+        ),
+        _ => format!("{sequence} | M{}", recipe.phrase.len()),
+    };
+    short.chars().take(width as usize).collect()
 }
 
 fn compact_ratio(value: f32) -> String {
@@ -1738,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn background_monitor_stays_visible_beside_every_control_tab() {
+    fn background_monitor_stays_visible_beside_environment_control_tabs() {
         let mut app = app();
         let mut snapshot = Renderer::new(RenderConfig::default()).unwrap().snapshot();
         snapshot.market.zoom = Unit::ONE;
@@ -1765,7 +1883,6 @@ mod tests {
                 (Tab::Scene, "SCENE /"),
                 (Tab::Market, "MARKET /"),
                 (Tab::Mixer, "MIXER /"),
-                (Tab::Sfx, "PALETTE /"),
                 (Tab::Reverb, "REVERB /"),
                 (Tab::Inspect, "BUILD /"),
             ] {
@@ -1839,6 +1956,88 @@ mod tests {
                 assert!(
                     hits.0.iter().all(|hit| !hit.area.intersects(monitor)),
                     "control hit regions overlap the persistent monitor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn palette_uses_a_right_hand_inspector_with_every_component_solo_at_all_sizes() {
+        let mut app = app();
+        app.effect = SfxKind::Error;
+        app.select_tab(Tab::Sfx);
+        app.inspector_layer = SfxLayer::Crisp;
+        app.focus = Control::AuditionLayer(SfxLayer::Crisp);
+        app.snapshot = Some(Renderer::new(RenderConfig::default()).unwrap().snapshot());
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+            let text = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for expected in [
+                "PALETTE /",
+                "BUILD / error",
+                "Nominal",
+                "Play all",
+                "EQ3.0k -9dB",
+                "Crisp",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}:\n{text}"
+                );
+            }
+            let left_width = (width / 3).clamp(28, 48);
+            let left = Rect::new(0, 4, left_width, height - 7);
+            let right = Rect::new(left_width + 1, 4, width - left_width - 1, height - 7);
+            for control in [
+                Control::SelectEffect(app.effect),
+                Control::EventPan,
+                Control::EventIntensity,
+                Control::Trigger,
+                Control::Inspect,
+            ] {
+                let region = hits
+                    .region(control)
+                    .expect("palette controls remain accessible");
+                assert_eq!(
+                    region.intersection(left),
+                    region,
+                    "{control:?} escaped the left pane"
+                );
+            }
+            assert!(hits.region(Control::EventPan).unwrap().width >= 10);
+            for control in [Control::AuditionAll]
+                .into_iter()
+                .chain(SfxLayer::ALL.map(Control::AuditionLayer))
+            {
+                let region = hits
+                    .region(control)
+                    .expect("every source component can be auditioned");
+                assert_eq!(
+                    region.intersection(right),
+                    region,
+                    "{control:?} escaped the inspector pane"
+                );
+                assert_eq!(hits.at(region.x, region.y), Some(control));
+            }
+            for (index, hit) in hits.0.iter().enumerate() {
+                assert_eq!(
+                    hit.area.intersection(Rect::new(0, 0, width, height)),
+                    hit.area
+                );
+                assert!(
+                    hits.0[index + 1..]
+                        .iter()
+                        .all(|other| !hit.area.intersects(other.area)),
+                    "inspector and palette mouse targets overlap at {width}x{height}"
                 );
             }
         }

@@ -266,3 +266,24 @@ ratios. I/7 in the terminal panel exposes it with real-level layer solos;
 cover the event with envelopes restarted on macro phrase parts; Tonal uses
 single slots; Flecks and Shimmer repeat per part. Actual seed/pitch/duration
 variation and component selection remain in generated-event traces.
+
+## Broad comfort EQ and high-band intermodulation
+
+A shared SFX bell EQ applies -9 dB at 3 kHz with Q 0.65 to reduce the prominent
+mid/high-mid emphasis. It precedes the dry/reverb split and is exposed in each
+recipe. No global makeup gain compensates for the intended ear-pressure cut.
+
+Crisp is a separate sixth path, rather than a boost to the lower-band dirty
+Texture. It combines widely separated low/high oscillators, an auxiliary
+oscillator and LP-colored noise, with three-stage PM/noise contours, moving
+frequencies, and ratcheted amplitude. Its final 24 dB/oct HP is 6 kHz and LP
+16 kHz. The high-pass keeps complex modulation out of the lower body band.
+Like Shimmer it is disabled below 20 kHz sample rate; bands clamp for the
+actual device. All parameter contours, levels, and filters are source-backed
+recipe metadata and can be soloed at their real gain.
+
+Sharp routine sounds use lower sustain with slightly longer decay/release
+while retaining an immediate attack. The envelope is chosen per interaction
+family; it is not a requirement that every sound hold a rigid plateau.
+The SFX page keeps the palette left and construction inspector right at all
+supported terminal sizes. Other pages retain their background monitoring.

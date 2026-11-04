@@ -9,6 +9,7 @@ use crate::{
     harmony::Harmony,
     reverb::SpaceReverb,
     sfx::SfxBank,
+    sfx_eq::SfxEqFilter,
 };
 
 // Calibrate source buses before the user-controlled master. Layer controls
@@ -53,6 +54,7 @@ pub struct Renderer {
     sample: u64,
     background: Background,
     sfx: SfxBank,
+    sfx_eq: [SfxEqFilter; 2],
     harmony: Harmony,
     market: MarketContext,
     market_smoothers: [Smooth; 5],
@@ -112,6 +114,7 @@ impl Renderer {
                 config.seed ^ 0x5358_4658,
                 config.spatial,
             ),
+            sfx_eq: std::array::from_fn(|_| SfxEqFilter::new(config.sample_rate)),
             harmony,
             market,
             market_smoothers: market_values(market).map(|v| Smooth::new(v, 0.4, control_rate)),
@@ -266,7 +269,9 @@ impl Renderer {
             self.control();
         }
         let background = self.background.tick(self.current_mix);
-        let ui = self.sfx.tick();
+        let raw_ui = self.sfx.tick();
+        let ui =
+            std::array::from_fn::<_, 2, _>(|channel| self.sfx_eq[channel].tick(raw_ui[channel]));
         let focus = self.focus.value();
         let bg_send = self.current_reverb.environment.send.get();
         let ui_send = self.current_reverb.events.send.get();
