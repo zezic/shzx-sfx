@@ -604,11 +604,13 @@ fn tonal_editor_keeps_the_event_sequence_and_auditions_its_construction_settings
         &mut send,
     );
     app.adjust(
-        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::StepRate)),
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::RateStart)),
         50.0,
         &mut send,
     );
     let original_ratios = app.edited_recipe().tonal_pitch_ratios;
+    app.key(key(KeyCode::PageDown, KeyEventKind::Press), &mut send);
+    assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Rate));
     app.key(key(KeyCode::PageDown, KeyEventKind::Press), &mut send);
     assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Sequence));
     app.adjust(
@@ -694,4 +696,40 @@ fn resetting_tonal_construction_keeps_layer_mix_and_other_event_settings() {
     assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Mix));
     app.key(key(KeyCode::Char('r'), KeyEventKind::Press), &mut send);
     assert_eq!(app.current_edits(), SfxEdits::DEFAULT);
+}
+
+#[test]
+fn tonal_rate_endpoint_edits_preserve_the_other_endpoint_and_reset_to_the_palette() {
+    let mut app = app();
+    let mut send = |_| -> shzx_sfx::Result<()> { panic!("editing must stay silent") };
+    app.select_tab(Tab::Inspect);
+    app.activate(Control::EditLayer(SfxLayer::Tonal), &mut send);
+    app.activate(Control::SfxEditorPage(EditorPage::Rate), &mut send);
+    let palette = app.edited_recipe().tonal_rate;
+    let start = Control::SfxParameter(SfxParameter::Tonal(TonalParameter::RateStart));
+    let end = Control::SfxParameter(SfxParameter::Tonal(TonalParameter::RateEnd));
+    app.adjust(start, 50.0, &mut send);
+    assert_eq!(
+        app.edited_recipe().tonal_rate.start().get(),
+        palette.start().get() + 50.0
+    );
+    assert_eq!(app.edited_recipe().tonal_rate.end(), palette.end());
+    app.adjust(end, -50.0, &mut send);
+    assert_eq!(
+        app.edited_recipe().tonal_rate.start().get(),
+        palette.start().get() + 50.0
+    );
+    assert_eq!(
+        app.edited_recipe().tonal_rate.end().get(),
+        palette.end().get() - 50.0
+    );
+    let (current, _, _) = app.numeric(end).unwrap();
+    app.adjust(end, app.numeric(start).unwrap().0 - current, &mut send);
+    assert_eq!(
+        app.edited_recipe().tonal_rate.start(),
+        app.edited_recipe().tonal_rate.end()
+    );
+    app.activate(Control::ResetTonal, &mut send);
+    assert_eq!(app.edited_recipe().tonal_rate, palette);
+    assert!(app.current_edits().tonal.step_rate.is_none());
 }

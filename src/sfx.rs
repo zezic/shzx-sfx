@@ -2,8 +2,9 @@ use std::f32::consts::{FRAC_PI_4, TAU};
 
 use crate::dsp::{HighPass, LowPass, SineTable};
 use crate::{
-    GeneratedEvent, SFX_EQ, SfxEdits, SfxEq, SfxEvent, SfxFilterBand, SfxKind, SfxLayerSelection,
-    SfxLayerState, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalStep, SpatialMode,
+    GeneratedEvent, SFX_EQ, SfxEdits, SfxEq, SfxEvent, SfxFilterBand, SfxFmIndex, SfxFmRatio,
+    SfxKind, SfxLayerSelection, SfxLayerState, SfxMilliseconds, SfxScale, SfxStepRate,
+    SfxTonalEdits, SfxTonalRate, SfxTonalSequence, SfxTonalStep, SpatialMode,
 };
 
 /// Independently auditable components of an event voice.
@@ -116,7 +117,7 @@ impl std::fmt::Display for SfxModulation {
                 pulse_duty * 100.0
             ),
             Self::Fm { index, ratio } => {
-                write!(f, "low-index FM {index:.2}, modulator {ratio:.2}x")
+                write!(f, "FM index {index:.2}, modulator {ratio:.2}x")
             }
             Self::Phase { index, rate_hz } => write!(f, "PM {index:.3} cycles at {rate_hz:.2} Hz"),
             Self::WideIntermodulation {
@@ -188,7 +189,76 @@ pub struct SfxLayerRecipe {
     pub minimum_sample_rate: u32,
     pub generator: SfxGenerator,
     pub modulation: Option<SfxModulation>,
+    pub stereo: SfxLayerStereo,
 }
+
+/// Intrinsic layer width, applied before the event's positional pan and Haas.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum SfxLayerStereo {
+    Centered,
+    Detuned {
+        cents: f32,
+        rate_offset_percent: f32,
+    },
+    Delayed {
+        left_ms: f32,
+        right_ms: f32,
+        blend: f32,
+    },
+}
+
+impl std::fmt::Display for SfxLayerStereo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Centered => f.write_str("centered"),
+            Self::Detuned {
+                cents,
+                rate_offset_percent,
+            } => write!(f, "L/R +/-{cents:.0}ct; rate +/-{rate_offset_percent:.2}%"),
+            Self::Delayed {
+                left_ms,
+                right_ms,
+                blend,
+            } => write!(
+                f,
+                "L/R {left_ms:.2}/{right_ms:.2}ms; blend {:.0}%",
+                blend * 100.0
+            ),
+        }
+    }
+}
+
+impl SfxLayerStereo {
+    fn maximum_delay_ms(self) -> f32 {
+        match self {
+            Self::Delayed {
+                left_ms, right_ms, ..
+            } => left_ms.max(right_ms),
+            Self::Centered | Self::Detuned { .. } => 0.0,
+        }
+    }
+}
+
+const TONAL_STEREO: SfxLayerStereo = SfxLayerStereo::Detuned {
+    cents: 4.0,
+    rate_offset_percent: 0.15,
+};
+const FLECKS_STEREO: SfxLayerStereo = SfxLayerStereo::Delayed {
+    left_ms: 0.0,
+    right_ms: 0.24,
+    blend: 0.25,
+};
+const SHIMMER_STEREO: SfxLayerStereo = SfxLayerStereo::Delayed {
+    left_ms: 0.32,
+    right_ms: 0.0,
+    blend: 0.20,
+};
+const CRISP_STEREO: SfxLayerStereo = SfxLayerStereo::Delayed {
+    left_ms: 0.0,
+    right_ms: 0.16,
+    blend: 0.22,
+};
 
 /// A timed noise injection within each macro phrase part.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -214,7 +284,7 @@ pub struct SfxRecipe {
     pub detail_rate_hz: [f32; 2],
     pub hold_rate_hz: [f32; 2],
     pub tonal_pitch_ratios: [f32; 6],
-    pub tonal_rate_hz: [f32; 2],
+    pub tonal_rate: SfxTonalRate,
     pub tonal_base_hz: f32,
     pub filter_gesture: SfxFilterGesture,
     pub fleck_bursts: &'static [SfxBurst],
@@ -440,10 +510,23 @@ impl SfxPatch {
 
     fn tonal_ratios(self) -> &'static [f32; 6] {
         match self {
-            Self::Contact { .. } => &[1.0, 1.5, 2.0, 1.25, 1.0, 1.75],
-            Self::Digital { .. } => &[1.0, 1.25, 1.5, 2.0, 1.5, 1.0],
-            Self::Servo { .. } => &[2.0, 1.5, 1.0, 1.25, 1.75, 1.0],
-            Self::Air => &[1.0, 2.0, 1.5, 1.0, 1.25, 1.75],
+            Self::Contact { .. } => &[0.38, 1.70, 3.65, 0.67, 2.45, 0.31],
+            Self::Digital { .. } => &[0.30, 2.85, 0.75, 3.80, 1.35, 0.48],
+            Self::Servo { .. } => &[3.40, 0.42, 1.80, 0.31, 2.60, 0.86],
+            Self::Air => &[0.55, 3.20, 0.30, 1.65, 3.75, 0.92],
+        }
+    }
+
+    fn tonal_rate(self) -> SfxTonalRate {
+        let (start, end) = match self {
+            Self::Contact { .. } => (760.0, 190.0),
+            Self::Digital { .. } => (140.0, 980.0),
+            Self::Servo { .. } => (540.0, 85.0),
+            Self::Air => (90.0, 420.0),
+        };
+        SfxTonalRate::Sweep {
+            start: SfxStepRate::new(start).expect("patch clock starts within its supported range"),
+            end: SfxStepRate::new(end).expect("patch clock ends within its supported range"),
         }
     }
 
@@ -598,32 +681,32 @@ impl Articulation {
                 AccentPattern::Single,
                 FleckPattern::Tick,
                 3_300.0,
-                7_800.0,
-                0.045,
+                17_000.0,
+                0.07,
             ),
             Focus | TabOpen | TabClose | Search | DataRefresh | Confirm | Cancel => (
                 SfxFilterGesture::BandStep,
                 AccentPattern::Double,
                 FleckPattern::Double,
                 2_200.0,
-                6_800.0,
-                0.06,
+                15_500.0,
+                0.11,
             ),
             Scroll | ScrollbarGrab | ScrollbarMove | ScrollbarRelease | Resize | DragOver => (
                 SfxFilterGesture::Punch,
                 AccentPattern::Single,
                 FleckPattern::Tick,
                 2_900.0,
-                7_400.0,
-                0.05,
+                16_500.0,
+                0.08,
             ),
             ToggleOn | ToggleOff | DragStart | ZoomIn | ZoomOut => (
                 SfxFilterGesture::Ratchet,
                 AccentPattern::Ratchet,
                 FleckPattern::Ratchet,
                 1_700.0,
-                5_200.0,
-                0.05,
+                13_500.0,
+                0.10,
             ),
             OrderCreate | OrderFill | OrderCancel | Warning | Error | DropRejected
             | Notification | Connect | Disconnect | DialogOpen | DialogClose => (
@@ -631,16 +714,16 @@ impl Articulation {
                 AccentPattern::Double,
                 FleckPattern::Double,
                 1_600.0,
-                4_800.0,
-                0.04,
+                12_000.0,
+                0.15,
             ),
             _ => (
                 SfxFilterGesture::Punch,
                 AccentPattern::Double,
                 FleckPattern::Double,
                 2_500.0,
-                7_200.0,
-                0.055,
+                15_000.0,
+                0.12,
             ),
         };
         let filter_tail = match kind {
@@ -719,11 +802,36 @@ impl PitchEnvelope {
 }
 
 #[derive(Clone, Copy)]
+struct TonalParameters {
+    carrier: SfxScale,
+    fm_index: SfxFmIndex,
+    fm_ratio: SfxFmRatio,
+    rate: SfxTonalRate,
+    attack: SfxMilliseconds,
+    release: SfxMilliseconds,
+    pitch_ratios: Option<SfxTonalSequence>,
+}
+
+impl TonalParameters {
+    fn new(patch: SfxPatch, edits: SfxTonalEdits) -> Self {
+        Self {
+            carrier: edits.carrier,
+            fm_index: edits.fm_index,
+            fm_ratio: edits.fm_ratio,
+            rate: edits.step_rate.unwrap_or_else(|| patch.tonal_rate()),
+            attack: edits.attack,
+            release: edits.release,
+            pitch_ratios: edits.pitch_ratios,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Recipe {
     patch: SfxPatch,
     pitch_hz: f32,
     pitch_scale: SfxScale,
-    tonal: SfxTonalEdits,
+    tonal: TonalParameters,
     duration: f32,
     pitch: PitchEnvelope,
     gain: f32,
@@ -735,11 +843,12 @@ struct Recipe {
 
 impl Recipe {
     fn contact(pitch_hz: f32, duration: f32, metal: f32) -> Self {
+        let patch = SfxPatch::Contact { metal };
         Self {
-            patch: SfxPatch::Contact { metal },
+            patch,
             pitch_hz,
             pitch_scale: SfxScale::ONE,
-            tonal: SfxTonalEdits::DEFAULT,
+            tonal: TonalParameters::new(patch, SfxTonalEdits::DEFAULT),
             duration,
             pitch: PitchEnvelope::Settle {
                 semitones: 1.5,
@@ -754,14 +863,15 @@ impl Recipe {
     }
 
     fn digital(pitch_hz: f32, duration: f32, modulation: f32, gate_hz: f32) -> Self {
+        let patch = SfxPatch::Digital {
+            modulation,
+            gate_hz,
+        };
         Self {
-            patch: SfxPatch::Digital {
-                modulation,
-                gate_hz,
-            },
+            patch,
             pitch_hz,
             pitch_scale: SfxScale::ONE,
-            tonal: SfxTonalEdits::DEFAULT,
+            tonal: TonalParameters::new(patch, SfxTonalEdits::DEFAULT),
             duration,
             pitch: PitchEnvelope::Fixed,
             gain: 0.13,
@@ -773,11 +883,12 @@ impl Recipe {
     }
 
     fn servo(pitch_hz: f32, duration: f32, friction: f32) -> Self {
+        let patch = SfxPatch::Servo { friction };
         Self {
-            patch: SfxPatch::Servo { friction },
+            patch,
             pitch_hz,
             pitch_scale: SfxScale::ONE,
-            tonal: SfxTonalEdits::DEFAULT,
+            tonal: TonalParameters::new(patch, SfxTonalEdits::DEFAULT),
             duration,
             pitch: PitchEnvelope::Settle {
                 semitones: 0.75,
@@ -792,11 +903,12 @@ impl Recipe {
     }
 
     fn air(pitch_hz: f32, duration: f32) -> Self {
+        let patch = SfxPatch::Air;
         Self {
-            patch: SfxPatch::Air,
+            patch,
             pitch_hz,
             pitch_scale: SfxScale::ONE,
-            tonal: SfxTonalEdits::DEFAULT,
+            tonal: TonalParameters::new(patch, SfxTonalEdits::DEFAULT),
             duration,
             pitch: PitchEnvelope::Fixed,
             gain: 0.075,
@@ -906,14 +1018,12 @@ impl Recipe {
         let mut recipe = Self::for_kind(event.kind);
         recipe.pitch_scale = event.edits.pitch;
         recipe.duration *= event.edits.duration.get();
-        recipe.tonal = event.edits.tonal;
+        recipe.tonal = TonalParameters::new(recipe.patch, event.edits.tonal);
         recipe
     }
 
-    fn tonal_rate_hz(self) -> [f32; 2] {
-        self.tonal
-            .step_rate
-            .map_or(DETAIL_RATE_HZ, |rate| [rate.get(); 2])
+    fn tonal_rate(self) -> SfxTonalRate {
+        self.tonal.rate
     }
 
     fn tonal_pitch_ratios(self) -> [f32; 6] {
@@ -963,6 +1073,7 @@ impl Recipe {
                 minimum_sample_rate: 8_000,
                 generator: SfxGenerator::PulseBody,
                 modulation: None,
+                stereo: SfxLayerStereo::Centered,
             },
             SfxLayerRecipe {
                 layer: SfxLayer::Texture,
@@ -986,6 +1097,7 @@ impl Recipe {
                     fold_base_radians: FOLD_BASE_RADIANS,
                     fold_depth_radians: FOLD_DEPTH_RADIANS,
                 }),
+                stereo: SfxLayerStereo::Centered,
             },
             SfxLayerRecipe {
                 layer: SfxLayer::Tonal,
@@ -996,17 +1108,19 @@ impl Recipe {
                 attack_ms: self.tonal.attack.get(),
                 release_ms: self.tonal.release.get(),
                 start_ms: 0.0,
-                duration_ms: 2000.0 / self.tonal_rate_hz().iter().sum::<f32>(),
+                duration_ms: 2000.0
+                    / (self.tonal_rate().start().get() + self.tonal_rate().end().get()),
                 minimum_sample_rate: 8_000,
                 generator: SfxGenerator::TonalSequence,
                 modulation: Some(SfxModulation::Fm {
                     index: self.tonal.fm_index.get(),
                     ratio: self.tonal.fm_ratio.get(),
                 }),
+                stereo: TONAL_STEREO,
             },
             SfxLayerRecipe {
                 layer: SfxLayer::Flecks,
-                level: self.articulation.bright_level * 0.55,
+                level: self.articulation.bright_level,
                 highpass_hz: self.articulation.bright_highpass,
                 lowpass_hz: self.articulation.bright_lowpass,
                 carrier_hz: None,
@@ -1023,6 +1137,7 @@ impl Recipe {
                 minimum_sample_rate: 8_000,
                 generator: SfxGenerator::FilteredNoise,
                 modulation: None,
+                stereo: FLECKS_STEREO,
             },
             SfxLayerRecipe {
                 layer: SfxLayer::Shimmer,
@@ -1040,6 +1155,7 @@ impl Recipe {
                     index: SHIMMER_PM_CYCLES,
                     rate_hz: SHIMMER_MOD_HZ,
                 }),
+                stereo: SHIMMER_STEREO,
             },
             SfxLayerRecipe {
                 layer: SfxLayer::Crisp,
@@ -1062,6 +1178,7 @@ impl Recipe {
                     noise_lowpass_hz: crisp.noise_lowpass_hz,
                     ratchet_hz: crisp.ratchet_hz,
                 }),
+                stereo: CRISP_STEREO,
             },
         ]
     }
@@ -1122,7 +1239,7 @@ impl Recipe {
             detail_rate_hz: DETAIL_RATE_HZ,
             hold_rate_hz: HOLD_RATE_HZ,
             tonal_pitch_ratios: recipe.tonal_pitch_ratios(),
-            tonal_rate_hz: recipe.tonal_rate_hz(),
+            tonal_rate: recipe.tonal_rate(),
             tonal_base_hz: tonal_carrier(recipe.pitch_hz, recipe.pitch_scale)
                 * recipe.tonal.carrier.get(),
             filter_gesture: recipe.articulation.filter,
@@ -1150,26 +1267,98 @@ struct StepState {
     previous_noise: f32,
     fm_phase: f32,
     sync_phase: f32,
-    tonal_phase: f32,
-    tonal_mod_phase: f32,
+    tonal: [TonalState; 2],
     shimmer_phase: f32,
     shimmer_mod_phase: f32,
 }
 
+#[derive(Clone, Copy)]
+struct PhraseTime {
+    time: f32,
+    duration: f32,
+}
+
+#[derive(Clone, Copy)]
+struct TonalFrame {
+    carrier_hz: f32,
+    cycles: f64,
+    offset: f32,
+    rate_hz: f32,
+}
+
+struct TonalState {
+    phase: f32,
+    mod_phase: f32,
+    tuning: f32,
+    rate_scale: f32,
+}
+
+impl TonalState {
+    fn pair(phase: f32, mod_phase: f32) -> [Self; 2] {
+        let SfxLayerStereo::Detuned {
+            cents,
+            rate_offset_percent,
+        } = TONAL_STEREO
+        else {
+            unreachable!("tonal voices have independent detuned stereo lanes")
+        };
+        [-1.0, 1.0].map(|side| Self {
+            phase,
+            mod_phase,
+            tuning: 2.0_f32.powf(side * cents / 1200.0),
+            rate_scale: 1.0 + side * rate_offset_percent / 100.0,
+        })
+    }
+
+    fn tick(
+        &mut self,
+        frame: TonalFrame,
+        recipe: Recipe,
+        sample_rate: f32,
+        table: &SineTable,
+    ) -> f32 {
+        let clock = frame.cycles * f64::from(self.rate_scale) + f64::from(frame.offset);
+        let rate = frame.rate_hz * self.rate_scale;
+        let grain_phase = clock.fract() as f32;
+        let ratio = match recipe.tonal.pitch_ratios {
+            Some(sequence) => sequence.get(SfxTonalStep::at_clock(clock)).get(),
+            None => recipe.patch.tonal_ratios()[clock as usize % 6],
+        };
+        let carrier = (frame.carrier_hz * ratio * self.tuning).min(sample_rate * 0.36);
+        let modulator = (carrier * recipe.tonal.fm_ratio.get()).min(sample_rate * 0.42);
+        self.mod_phase = (self.mod_phase + modulator / sample_rate).fract();
+        let phase = (self.phase
+            + (carrier + table.at(self.mod_phase) * recipe.tonal.fm_index.get() * modulator)
+                / sample_rate)
+            .fract();
+        self.phase = if phase < 0.0 { phase + 1.0 } else { phase };
+        let slot_seconds = 1.0 / rate;
+        let envelope = (grain_phase * slot_seconds / (recipe.tonal.attack.get() / 1000.0)).min(1.0)
+            * ((1.0 - grain_phase) * slot_seconds / (recipe.tonal.release.get() / 1000.0)).min(1.0);
+        table.at(self.phase) * envelope
+    }
+}
+
 impl StepState {
     fn new(rng: &mut fastrand::Rng) -> Self {
+        let phase = std::array::from_fn(|_| rng.f32());
+        let hold_hz = HOLD_RATE_HZ[0] + rng.f32() * (HOLD_RATE_HZ[1] - HOLD_RATE_HZ[0]);
+        let detail_rate = DETAIL_RATE_HZ[0] + rng.f32() * (DETAIL_RATE_HZ[1] - DETAIL_RATE_HZ[0]);
+        let detail_offset = rng.f32() * 6.0;
+        let fm_phase = rng.f32();
+        let sync_phase = rng.f32();
+        let tonal = TonalState::pair(rng.f32(), rng.f32());
         Self {
-            phase: std::array::from_fn(|_| rng.f32()),
+            phase,
             held_noise: 0.0,
             hold_frames: 0,
-            hold_hz: HOLD_RATE_HZ[0] + rng.f32() * (HOLD_RATE_HZ[1] - HOLD_RATE_HZ[0]),
-            detail_rate: DETAIL_RATE_HZ[0] + rng.f32() * (DETAIL_RATE_HZ[1] - DETAIL_RATE_HZ[0]),
-            detail_offset: rng.f32() * 6.0,
+            hold_hz,
+            detail_rate,
+            detail_offset,
             previous_noise: 0.0,
-            fm_phase: rng.f32(),
-            sync_phase: rng.f32(),
-            tonal_phase: rng.f32(),
-            tonal_mod_phase: rng.f32(),
+            fm_phase,
+            sync_phase,
+            tonal,
             shimmer_phase: rng.f32(),
             shimmer_mod_phase: rng.f32(),
         }
@@ -1179,11 +1368,12 @@ impl StepState {
         &mut self,
         recipe: Recipe,
         pitch_hz: f32,
-        time: f32,
+        phrase: PhraseTime,
         sample_rate: f32,
         rng: &mut fastrand::Rng,
         table: &SineTable,
     ) -> SourceParts {
+        let time = phrase.time;
         let frequency = pitch_hz * recipe.pitch_scale.get() * recipe.pitch.ratio(time);
         let ratios = recipe.patch.ratios();
         let previous_master = self.phase[0];
@@ -1281,38 +1471,21 @@ impl StepState {
             SfxPatch::Servo { .. } => partials[0] * 0.17 + table.at(self.sync_phase) * 0.04,
             SfxPatch::Air => partials[0] * 0.05,
         };
-        let tonal_rate = recipe
-            .tonal
-            .step_rate
-            .map_or(self.detail_rate, SfxStepRate::get);
-        let tonal_clock = time * tonal_rate + self.detail_offset;
-        let tonal_grain_phase = tonal_clock.fract();
-        let tonal_ratio = match recipe.tonal.pitch_ratios {
-            Some(sequence) => sequence.get(SfxTonalStep::at_clock(tonal_clock)).get(),
-            None => recipe.patch.tonal_ratios()[tonal_clock as usize % 6],
+        let rate = recipe.tonal_rate();
+        let tonal_frame = TonalFrame {
+            carrier_hz: tonal_carrier(pitch_hz, recipe.pitch_scale) * recipe.tonal.carrier.get(),
+            cycles: rate.cycles(time, phrase.duration),
+            offset: self.detail_offset,
+            rate_hz: rate.at_time(time, phrase.duration),
         };
-        let tonal_hz = (tonal_carrier(pitch_hz, recipe.pitch_scale)
-            * recipe.tonal.carrier.get()
-            * tonal_ratio)
-            .min(sample_rate * 0.36);
-        let modulator_hz = (tonal_hz * recipe.tonal.fm_ratio.get()).min(sample_rate * 0.42);
-        self.tonal_mod_phase = (self.tonal_mod_phase + modulator_hz / sample_rate).fract();
-        let phase = (self.tonal_phase
-            + (tonal_hz
-                + table.at(self.tonal_mod_phase) * recipe.tonal.fm_index.get() * modulator_hz)
-                / sample_rate)
-            .fract();
-        self.tonal_phase = if phase < 0.0 { phase + 1.0 } else { phase };
-        let slot_seconds = 1.0 / tonal_rate;
-        let slot_envelope = (tonal_grain_phase * slot_seconds
-            / (recipe.tonal.attack.get() / 1000.0))
-            .min(1.0)
-            * ((1.0 - tonal_grain_phase) * slot_seconds / (recipe.tonal.release.get() / 1000.0))
-                .min(1.0);
+        let tonal = self
+            .tonal
+            .each_mut()
+            .map(|state| state.tick(tonal_frame, recipe, sample_rate, table));
         SourceParts {
             body,
             texture: dirty_body * 0.35 + grain * 0.85 + onset,
-            tonal: table.at(self.tonal_phase) * slot_envelope,
+            tonal,
         }
     }
 
@@ -1348,7 +1521,7 @@ impl StepState {
 struct SourceParts {
     body: f32,
     texture: f32,
-    tonal: f32,
+    tonal: [f32; 2],
 }
 
 struct BodyFilter {
@@ -1585,20 +1758,25 @@ impl From<[SfxLayerRecipe; 6]> for LayerProfiles {
 }
 
 struct LayerSamples {
-    body: f32,
-    texture: f32,
-    tonal: f32,
-    flecks: f32,
-    shimmer: f32,
-    crisp: f32,
+    body: [f32; 2],
+    texture: [f32; 2],
+    tonal: [f32; 2],
+    flecks: [f32; 2],
+    shimmer: [f32; 2],
+    crisp: [f32; 2],
 }
 
 impl LayerSamples {
-    fn select(self, selection: SfxLayerSelection) -> f32 {
+    fn select(self, selection: SfxLayerSelection) -> [f32; 2] {
         match selection {
-            SfxLayerSelection::All => {
-                self.body + self.texture + self.tonal + self.flecks + self.shimmer + self.crisp
-            }
+            SfxLayerSelection::All => std::array::from_fn(|channel| {
+                self.body[channel]
+                    + self.texture[channel]
+                    + self.tonal[channel]
+                    + self.flecks[channel]
+                    + self.shimmer[channel]
+                    + self.crisp[channel]
+            }),
             SfxLayerSelection::Only(layer) => match layer {
                 SfxLayer::Body => self.body,
                 SfxLayer::Texture => self.texture,
@@ -1628,7 +1806,7 @@ struct Voice {
     rng: fastrand::Rng,
     body_filter: BodyFilter,
     texture_filter: BodyFilter,
-    tonal_filter: BandFilter,
+    tonal_filter: [BandFilter; 2],
     shimmer_filter: BandFilter,
     bright: BrightDetail,
     crisp: CrispDetail,
@@ -1651,8 +1829,6 @@ impl Voice {
         let pan = event.pan.get();
         let angle = (pan + 1.0) * FRAC_PI_4;
         let delay_frames = ((0.002 + 0.006 * pan.abs()) * sample_rate).round() as usize;
-        let end_frame = ((duration + recipe.articulation.filter_tail) * sample_rate).ceil() as u32
-            + delay_frames as u32;
         let base_cutoff = recipe.cutoff * (0.94 + rng.f32() * 0.12);
         let (cutoff, _) = recipe.articulation.filter.cutoffs(0.0, base_cutoff);
         let level = recipe.gain * event.intensity.get() * (0.93 + rng.f32() * 0.14);
@@ -1664,6 +1840,16 @@ impl Voice {
             }
         }
         let profiles = LayerProfiles::from(layer_recipes);
+        let detail_tail_frames = (layer_recipes
+            .iter()
+            .map(|profile| profile.stereo.maximum_delay_ms())
+            .fold(0.0_f32, f32::max)
+            * sample_rate
+            / 1000.0)
+            .ceil() as u32;
+        let end_frame = ((duration + recipe.articulation.filter_tail) * sample_rate).ceil() as u32
+            + detail_tail_frames
+            + delay_frames as u32;
         let body_band = event.edits.layer(SfxLayer::Body).filter;
         let texture_band = event.edits.layer(SfxLayer::Texture).filter;
         let (body_lowpass, body_highpass) = recipe.layer_cutoffs(body_band, 0.0, base_cutoff);
@@ -1693,11 +1879,13 @@ impl Voice {
             rng,
             body_filter: BodyFilter::new(sample_rate, body_highpass, body_lowpass),
             texture_filter: BodyFilter::new(sample_rate, texture_highpass, texture_lowpass),
-            tonal_filter: BandFilter::new(
-                sample_rate,
-                profiles.tonal.highpass_hz,
-                profiles.tonal.lowpass_hz,
-            ),
+            tonal_filter: std::array::from_fn(|_| {
+                BandFilter::new(
+                    sample_rate,
+                    profiles.tonal.highpass_hz,
+                    profiles.tonal.lowpass_hz,
+                )
+            }),
             shimmer_filter: BandFilter::new(
                 sample_rate,
                 profiles.shimmer.highpass_hz,
@@ -1727,12 +1915,12 @@ impl Voice {
         (voice, generated)
     }
 
-    fn tick(&mut self, table: &SineTable) -> f32 {
+    fn tick(&mut self, table: &SineTable) -> LayerSamples {
         let time = self.age as f32 / self.sample_rate;
         let mut parts = SourceParts {
             body: 0.0,
             texture: 0.0,
-            tonal: 0.0,
+            tonal: [0.0; 2],
         };
         let mut shimmer = 0.0;
         let mut crisp = 0.0;
@@ -1748,14 +1936,19 @@ impl Voice {
                 let source = state.source(
                     self.recipe,
                     self.nominal_pitch_hz * step.pitch_ratio,
-                    local_time,
+                    PhraseTime {
+                        time: local_time,
+                        duration,
+                    },
                     self.sample_rate,
                     &mut self.rng,
                     table,
                 );
                 parts.body += source.body * envelope;
                 parts.texture += source.texture * envelope;
-                parts.tonal += source.tonal * envelope;
+                for (sum, source) in parts.tonal.iter_mut().zip(source.tonal) {
+                    *sum += source * envelope;
+                }
                 shimmer += state.shimmer(
                     local_time,
                     self.nominal_pitch_hz * step.pitch_ratio,
@@ -1785,21 +1978,63 @@ impl Voice {
         }
         self.age += 1;
         LayerSamples {
-            body: self.body_filter.tick(parts.body * self.level) * self.profiles.body.level,
-            texture: self.texture_filter.tick(parts.texture * self.level)
-                * self.profiles.texture.level,
-            tonal: self.tonal_filter.tick(parts.tonal * self.level) * self.profiles.tonal.level,
-            flecks: self.bright.tick(bright_envelope) * self.level,
-            shimmer: self.shimmer_filter.tick(shimmer * self.level) * self.profiles.shimmer.level,
-            crisp: self.crisp.filter(crisp * self.level),
+            body: [self.body_filter.tick(parts.body * self.level) * self.profiles.body.level; 2],
+            texture: [self.texture_filter.tick(parts.texture * self.level)
+                * self.profiles.texture.level; 2],
+            tonal: std::array::from_fn(|channel| {
+                self.tonal_filter[channel].tick(parts.tonal[channel] * self.level)
+                    * self.profiles.tonal.level
+            }),
+            flecks: [self.bright.tick(bright_envelope) * self.level; 2],
+            shimmer: [self.shimmer_filter.tick(shimmer * self.level) * self.profiles.shimmer.level;
+                2],
+            crisp: [self.crisp.filter(crisp * self.level); 2],
         }
-        .select(self.layers)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DelayFrame {
+    haas: [f32; 2],
+    flecks: f32,
+    shimmer: f32,
+    crisp: f32,
+}
+
+#[derive(Clone, Copy)]
+struct LayerDelay {
+    frames: [usize; 2],
+    blend: f32,
+}
+
+impl LayerDelay {
+    fn new(sample_rate: f32, stereo: SfxLayerStereo) -> Self {
+        let SfxLayerStereo::Delayed {
+            left_ms,
+            right_ms,
+            blend,
+        } = stereo
+        else {
+            unreachable!("detail delay taps require a delayed layer profile")
+        };
+        Self {
+            frames: [left_ms, right_ms].map(|ms| (ms * sample_rate / 1000.0).round() as usize),
+            blend,
+        }
+    }
+
+    fn apply(self, current: f32, read: impl Fn(usize) -> f32) -> [f32; 2] {
+        self.frames
+            .map(|frames| current * (1.0 - self.blend) + read(frames) * self.blend)
     }
 }
 
 struct VoiceSlot {
     voice: Option<Voice>,
-    delay: Vec<f32>,
+    delay: Vec<DelayFrame>,
+    flecks_delay: LayerDelay,
+    shimmer_delay: LayerDelay,
+    crisp_delay: LayerDelay,
     cursor: usize,
     last_output: [f32; 2],
     residual: [f32; 2],
@@ -1811,7 +2046,10 @@ impl VoiceSlot {
     fn new(sample_rate: u32) -> Self {
         Self {
             voice: None,
-            delay: vec![0.0; (sample_rate as f32 * 0.008).ceil() as usize + 1],
+            delay: vec![DelayFrame::default(); (sample_rate as f32 * 0.008).ceil() as usize + 1],
+            flecks_delay: LayerDelay::new(sample_rate as f32, FLECKS_STEREO),
+            shimmer_delay: LayerDelay::new(sample_rate as f32, SHIMMER_STEREO),
+            crisp_delay: LayerDelay::new(sample_rate as f32, CRISP_STEREO),
             cursor: 0,
             last_output: [0.0; 2],
             residual: [0.0; 2],
@@ -1825,7 +2063,7 @@ impl VoiceSlot {
             self.residual = self.last_output;
             self.residual_left = self.residual_frames;
         }
-        self.delay.fill(0.0);
+        self.delay.fill(DelayFrame::default());
         self.cursor = 0;
         self.voice = Some(voice);
     }
@@ -1833,16 +2071,31 @@ impl VoiceSlot {
     fn tick(&mut self, spatial_mix: f32, table: &SineTable) -> [f32; 2] {
         let mut output = [0.0; 2];
         if let Some(voice) = &mut self.voice {
-            let mono = voice.tick(table);
+            let mut samples = voice.tick(table);
+            self.delay[self.cursor].flecks = samples.flecks[0];
+            self.delay[self.cursor].shimmer = samples.shimmer[0];
+            self.delay[self.cursor].crisp = samples.crisp[0];
+            let read =
+                |frames| &self.delay[(self.cursor + self.delay.len() - frames) % self.delay.len()];
+            samples.flecks = self
+                .flecks_delay
+                .apply(samples.flecks[0], |frames| read(frames).flecks);
+            samples.shimmer = self
+                .shimmer_delay
+                .apply(samples.shimmer[0], |frames| read(frames).shimmer);
+            samples.crisp = self
+                .crisp_delay
+                .apply(samples.crisp[0], |frames| read(frames).crisp);
+            let stereo = samples.select(voice.layers);
             let read = (self.cursor + self.delay.len() - voice.delay_frames) % self.delay.len();
-            let delayed = self.delay[read];
-            self.delay[self.cursor] = mono;
+            let delayed = self.delay[read].haas;
+            self.delay[self.cursor].haas = stereo;
             self.cursor = (self.cursor + 1) % self.delay.len();
-            output = [mono * voice.pan_gains[0], mono * voice.pan_gains[1]];
+            output = std::array::from_fn(|channel| stereo[channel] * voice.pan_gains[channel]);
             // Keep the direct signal intact; the quiet delayed opposite-ear copy
             // adds depth while retaining useful dry energy when folded to mono.
             let opposite = usize::from(voice.pan < 0.0);
-            output[opposite] += delayed * 0.18 * voice.pan.abs() * spatial_mix;
+            output[opposite] += delayed[1 - opposite] * 0.18 * voice.pan.abs() * spatial_mix;
             if voice.age >= voice.end_frame {
                 self.voice = None;
             }
@@ -2022,6 +2275,125 @@ mod tests {
 
     const SAMPLE_RATE: u32 = 48_000;
 
+    #[test]
+    fn tonal_rate_sweeps_integrate_without_clock_jumps_or_reversed_steps() {
+        let duration = 3.8;
+        for (start, end) in [(20.0, 2_000.0), (2_000.0, 20.0), (80.0, 80.0)] {
+            let rate = SfxTonalRate::Sweep {
+                start: SfxStepRate::new(start).unwrap(),
+                end: SfxStepRate::new(end).unwrap(),
+            };
+            assert_eq!(rate.at_time(0.0, duration), start);
+            assert_eq!(rate.at_time(duration, duration), end);
+            let expected_cycles = f64::from((start + end) * 0.5) * f64::from(duration);
+            assert!((rate.cycles(duration, duration) - expected_cycles).abs() < 0.00001);
+            for progress in [0.1, 0.5, 0.9] {
+                let time = duration * progress;
+                let delta = 0.001;
+                let measured_rate = (rate.cycles(time + delta, duration)
+                    - rate.cycles(time - delta, duration))
+                    / f64::from(2.0 * delta);
+                assert!((measured_rate - f64::from(rate.at_time(time, duration))).abs() < 0.2);
+            }
+            for sample_rate in [8_000, 48_000, 192_000] {
+                let mut previous = 0.0;
+                for frame in 1..(duration * sample_rate as f32) as u32 {
+                    let time = frame as f32 / sample_rate as f32;
+                    let cycles = rate.cycles(time, duration);
+                    assert!(
+                        cycles > previous,
+                        "{start}->{end} at {sample_rate} Hz, frame {frame}"
+                    );
+                    assert!(
+                        cycles - previous
+                            < f64::from(SfxStepRate::MAX_HZ) / f64::from(sample_rate) * 1.05
+                    );
+                    previous = cycles;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detail_and_haas_tails_finish_within_the_reported_voice_duration() {
+        let table = SineTable::new();
+        for sample_rate in [8_000, 28_000, 48_000, 192_000] {
+            let event = SfxEvent {
+                pan: Pan::new(0.8).unwrap(),
+                ..SfxEvent::new(SfxKind::Confirm)
+            };
+            let (voice, generated) = Voice::new(event, sample_rate, 16, 0);
+            let minimum_duration = voice.duration
+                + voice.recipe.articulation.filter_tail
+                + SHIMMER_STEREO.maximum_delay_ms() / 1000.0
+                + voice.delay_frames as f32 / sample_rate as f32;
+            assert!(generated.duration_seconds >= minimum_duration - 1.0 / sample_rate as f32);
+            let end_frame = voice.end_frame;
+            let mut slot = VoiceSlot::new(sample_rate);
+            let maximum_tap = slot
+                .flecks_delay
+                .frames
+                .into_iter()
+                .chain(slot.shimmer_delay.frames)
+                .chain(slot.crisp_delay.frames)
+                .max()
+                .unwrap();
+            let source_frames = ((voice.duration + voice.recipe.articulation.filter_tail)
+                * sample_rate as f32)
+                .ceil() as u32;
+            let required_frames = source_frames + maximum_tap as u32 + voice.delay_frames as u32;
+            let reported_frames = (generated.duration_seconds * sample_rate as f32).round() as u32;
+            assert!(reported_frames >= required_frames);
+            slot.start(voice);
+            for _ in 0..end_frame - 1 {
+                slot.tick(1.0, &table);
+                assert!(slot.voice.is_some());
+            }
+            slot.tick(1.0, &table);
+            assert!(slot.voice.is_none());
+            assert_eq!(slot.tick(1.0, &table), [0.0; 2]);
+        }
+    }
+
+    #[test]
+    fn stealing_a_voice_flushes_every_intrinsic_and_haas_delay_tap() {
+        let table = SineTable::new();
+        for sample_rate in [8_000, 48_000, 192_000] {
+            let mut slot = VoiceSlot::new(sample_rate);
+            let event = SfxEvent {
+                pan: Pan::new(-0.8).unwrap(),
+                ..SfxEvent::new(SfxKind::Confirm)
+            };
+            let (voice, _) = Voice::new(event, sample_rate, 71, 0);
+            slot.start(voice);
+            for _ in 0..(sample_rate as f32 * 0.014) as u32 {
+                slot.tick(1.0, &table);
+            }
+            assert!(slot.delay.iter().any(|frame| frame.haas != [0.0; 2]));
+            let silent_event = SfxEvent {
+                intensity: Unit::ZERO,
+                ..event
+            };
+            let (silent, _) = Voice::new(silent_event, sample_rate, 81, 0);
+            slot.start(silent);
+            assert!(slot.delay.iter().all(|frame| frame.haas == [0.0; 2]
+                && frame.flecks == 0.0
+                && frame.shimmer == 0.0
+                && frame.crisp == 0.0));
+            let fade_frames = slot.residual_frames;
+            for frame in 0..fade_frames + slot.delay.len() as u32 {
+                let output = slot.tick(1.0, &table);
+                assert!(output.into_iter().all(f32::is_finite));
+                if frame >= fade_frames {
+                    assert_eq!(
+                        output, [0.0; 2],
+                        "stale audio escaped at {sample_rate} Hz, frame {frame}"
+                    );
+                }
+            }
+        }
+    }
+
     fn render_component(kind: SfxKind, layer: SfxLayer, rate: u32) -> Vec<[f32; 2]> {
         let mut bank = SfxBank::new(rate, 1, 71, SpatialMode::Pan);
         let event = bank
@@ -2149,8 +2521,9 @@ mod tests {
             let mut quiet_energy = 0.0_f64;
             let mut unit_energy = 0.0_f64;
             for _ in 0..quieter.end_frame {
-                quiet_energy += f64::from(quieter.tick(&table)).powi(2);
-                unit_energy += f64::from(unit_layer.tick(&table)).powi(2);
+                quiet_energy += f64::from(quieter.tick(&table).select(quieter.layers)[0]).powi(2);
+                unit_energy +=
+                    f64::from(unit_layer.tick(&table).select(unit_layer.layers)[0]).powi(2);
             }
             let ratio = quiet_energy / unit_energy;
             assert!(
@@ -2210,7 +2583,8 @@ mod tests {
             body_only.bright.level = 0.0;
             let mut highpass = HighPass::new(SAMPLE_RATE as f32, 2_500.0);
             for frame in 0..(SAMPLE_RATE / 20) {
-                let detail = voice.tick(&table) - body_only.tick(&table);
+                let detail = voice.tick(&table).select(voice.layers)[0]
+                    - body_only.tick(&table).select(body_only.layers)[0];
                 let high = highpass.tick(detail);
                 detail_energy += detail * detail;
                 high_band_energy += high * high;
@@ -2247,7 +2621,7 @@ mod tests {
             let (mut voice, _) = Voice::new(SfxEvent::new(SfxKind::Focus), SAMPLE_RATE, seed, 0);
             let duration = voice.duration;
             let samples: Vec<_> = (0..((duration + 0.02) * SAMPLE_RATE as f32) as usize)
-                .map(|_| voice.tick(&table))
+                .map(|_| voice.tick(&table).select(voice.layers)[0])
                 .collect();
             let rms = |start: f32, end: f32| {
                 let window = &samples
@@ -2286,7 +2660,17 @@ mod tests {
             let mut state = StepState::new(&mut rng);
             let frequency_at = |time: f32, state: &mut StepState, rng: &mut fastrand::Rng| {
                 let before = state.phase[0];
-                state.source(recipe, 400.0, time, SAMPLE_RATE as f32, rng, &table);
+                state.source(
+                    recipe,
+                    400.0,
+                    PhraseTime {
+                        time,
+                        duration: recipe.duration,
+                    },
+                    SAMPLE_RATE as f32,
+                    rng,
+                    &table,
+                );
                 (state.phase[0] - before).rem_euclid(1.0) * SAMPLE_RATE as f32
             };
             let early = frequency_at(0.006, &mut state, &mut rng);
@@ -2305,7 +2689,9 @@ mod tests {
         let table = SineTable::new();
         let start = (0.02 * SAMPLE_RATE as f32) as usize;
         let end = ((voice.duration - 0.008) * SAMPLE_RATE as f32) as usize;
-        let samples: Vec<_> = (0..end).map(|_| voice.tick(&table)).collect();
+        let samples: Vec<_> = (0..end)
+            .map(|_| voice.tick(&table).select(voice.layers)[0])
+            .collect();
         let window = &samples[start..];
         let mut projection = [0.0_f64; 2];
         let mut energy = 0.0_f64;
@@ -2404,10 +2790,16 @@ mod tests {
         }
         let mut center = bank(81, 1, SpatialMode::Haas);
         center.trigger(SfxEvent::new(SfxKind::Click)).unwrap();
+        let mut energy = [0.0; 2];
+        let mut side = 0.0;
         for _ in 0..4_000 {
             let [left, right] = center.tick();
-            assert!((left - right).abs() < 0.000001);
+            energy[0] += left * left;
+            energy[1] += right * right;
+            side += (left - right).powi(2);
         }
+        assert!((0.75..1.25).contains(&(energy[0] / energy[1])));
+        assert!(side > (energy[0] + energy[1]) * 0.001);
     }
 
     #[test]

@@ -24,6 +24,6 @@ pub use playback::*;
 pub use renderer::{Renderer, Snapshot};
 pub use sfx::{
     SfxBurst, SfxDetail, SfxEnvelope, SfxFilterGesture, SfxGenerator, SfxLayer, SfxLayerRecipe,
-    SfxModulation, SfxPatch, SfxPitch, SfxRecipe, SfxStep,
+    SfxLayerStereo, SfxModulation, SfxPatch, SfxPitch, SfxRecipe, SfxStep,
 };
 pub use sfx_eq::{SFX_EQ, SfxEq};

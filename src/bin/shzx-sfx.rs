@@ -991,7 +991,7 @@ fn print_recipe(kind: SfxKind, json: bool) -> CliResult<()> {
         recipe.eq.center_hz, recipe.eq.gain_db, recipe.eq.q
     );
     println!(
-        "Signal path: phrase/envelopes -> layer generators and HP/LP filters -> layer levels -> sum -> pan/Haas -> SFX EQ -> UI dry and reverb send -> output mixer."
+        "Signal path: phrase/envelopes -> layer generators and HP/LP filters -> layer levels/stereo spread -> stereo sum -> pan/Haas -> SFX EQ -> UI dry and reverb send -> output mixer."
     );
     println!("Patch: {}", recipe.patch);
     println!(
@@ -1033,6 +1033,7 @@ fn print_recipe(kind: SfxKind, json: bool) -> CliResult<()> {
         if let Some(modulation) = layer.modulation {
             println!("  {modulation}");
         }
+        println!("  Stereo: {}", layer.stereo);
         if let Some(carrier) = layer.carrier_hz {
             println!(
                 "  Nominal carrier {:.0} Hz before note ratios and seeded pitch variation.",
@@ -1079,6 +1080,7 @@ fn print_recipe(kind: SfxKind, json: bool) -> CliResult<()> {
         "Tonal notes: {:.0} Hz x {:?}",
         recipe.tonal_base_hz, recipe.tonal_pitch_ratios
     );
+    println!("Tonal step clock: {} per phrase part", recipe.tonal_rate);
     println!("Macro phrase:");
     for step in recipe.phrase {
         println!(

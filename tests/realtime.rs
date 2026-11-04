@@ -6,9 +6,9 @@ use std::{
 
 use shzx_sfx::{
     Command, MarketContext, Mix, Mode, OutputGain, Pan, RenderConfig, Renderer, ReverbSettings,
-    SfxEdits, SfxEvent, SfxFilterBand, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerState,
-    SfxMilliseconds, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalSequence, SpatialMode, Symbol,
-    Trend, Unit,
+    SfxEdits, SfxEvent, SfxFilterBand, SfxFmIndex, SfxFmRatio, SfxKind, SfxLayer, SfxLayerEdits,
+    SfxLayerState, SfxMilliseconds, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalRate,
+    SfxTonalSequence, SpatialMode, Symbol, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -99,9 +99,11 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
         edits.duration = SfxScale::new(4.0).unwrap();
         edits.tonal = SfxTonalEdits {
             carrier: SfxScale::new(4.0).unwrap(),
-            fm_index: Unit::ONE,
-            fm_ratio: SfxScale::new(4.0).unwrap(),
-            step_rate: Some(SfxStepRate::new(SfxStepRate::MAX_HZ).unwrap()),
+            fm_index: SfxFmIndex::new(SfxFmIndex::MAX).unwrap(),
+            fm_ratio: SfxFmRatio::new(SfxFmRatio::MAX).unwrap(),
+            step_rate: Some(SfxTonalRate::Fixed(
+                SfxStepRate::new(SfxStepRate::MAX_HZ).unwrap(),
+            )),
             attack: SfxMilliseconds::new(SfxMilliseconds::MIN).unwrap(),
             release: SfxMilliseconds::new(SfxMilliseconds::MIN).unwrap(),
             pitch_ratios: Some(SfxTonalSequence::new([SfxScale::new(4.0).unwrap(); 6])),
@@ -120,6 +122,16 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
                 },
             );
         }
+        let mut accelerating = edits;
+        accelerating.tonal.step_rate = Some(SfxTonalRate::Sweep {
+            start: SfxStepRate::new(SfxStepRate::MIN_HZ).unwrap(),
+            end: SfxStepRate::new(SfxStepRate::MAX_HZ).unwrap(),
+        });
+        let mut decelerating = edits;
+        decelerating.tonal.step_rate = Some(SfxTonalRate::Sweep {
+            start: SfxStepRate::new(SfxStepRate::MAX_HZ).unwrap(),
+            end: SfxStepRate::new(SfxStepRate::MIN_HZ).unwrap(),
+        });
         let mut commands: Vec<_> = SfxKind::iter()
             .map(|kind| {
                 Command::Trigger(SfxEvent {
@@ -132,6 +144,14 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             })
             .collect();
         commands.extend([
+            Command::Trigger(SfxEvent {
+                edits: accelerating,
+                ..SfxEvent::new(SfxKind::Confirm)
+            }),
+            Command::Trigger(SfxEvent {
+                edits: decelerating,
+                ..SfxEvent::new(SfxKind::Cancel)
+            }),
             Command::Trigger(SfxEvent {
                 edits,
                 ..SfxEvent::new(SfxKind::OrderFill)

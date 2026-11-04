@@ -9,7 +9,8 @@ use ratatui::{
 use shzx_sfx::{
     AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState, DelaySnapshot,
     GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer, SfxLayerRecipe,
-    SfxLayerSelection, SfxLayerState, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend, Unit,
+    SfxLayerSelection, SfxLayerState, SfxLayerStereo, SfxModulation, SfxRecipe, Snapshot,
+    SpatialMode, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -911,6 +912,7 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         selected.release_ms,
         recipe.filter_gesture
     );
+    let stereo = stereo_text(selected.stereo);
     let detail_offset = 1 + recipe.layers.len() as u16;
     let room = inner.height.saturating_sub(detail_offset);
     let detail_y = inner.y + detail_offset;
@@ -922,18 +924,15 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         Rect::new(inner.x, detail_y, inner.width, 1),
     );
     if room == 2 {
-        let window = format!(
-            "{}{} {scope} {:.0}ms A{:.2}/R{:.2}",
+        let sequence = match selected.layer {
+            SfxLayer::Texture => format!(" | Micro {}", recipe.micro_pattern.len()),
+            SfxLayer::Tonal => format!(" | {}", tonal_rate_text(&recipe)),
+            _ => String::new(),
+        };
+        let brief = format!(
+            "{}{} {scope} | {stereo}{sequence}",
             selected.layer.label(),
             carrier,
-            selected.duration_ms,
-            selected.attack_ms,
-            selected.release_ms,
-        );
-        let sequence_width = inner.width.saturating_sub(window.len() as u16 + 3);
-        let brief = format!(
-            "{window} | {}",
-            sequence_text(&recipe, selected, sequence_width)
         );
         frame.render_widget(
             Paragraph::new(brief).style(Style::default().fg(DIM)),
@@ -943,17 +942,23 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     }
     if room > 1 {
         frame.render_widget(
-            Paragraph::new(window).style(Style::default().fg(DIM)),
+            Paragraph::new(stereo).style(Style::default().fg(CYAN)),
             Rect::new(inner.x, detail_y + 1, inner.width, 1),
         );
     }
     if room > 2 {
         frame.render_widget(
-            Paragraph::new(sequence_text(&recipe, selected, inner.width)),
+            Paragraph::new(window).style(Style::default().fg(DIM)),
             Rect::new(inner.x, detail_y + 2, inner.width, 1),
         );
     }
     if room > 3 {
+        frame.render_widget(
+            Paragraph::new(sequence_text(&recipe, selected, inner.width)),
+            Rect::new(inner.x, detail_y + 3, inner.width, 1),
+        );
+    }
+    if room > 4 {
         let env = recipe.envelope;
         frame.render_widget(
             Paragraph::new(format!(
@@ -965,24 +970,24 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
                 db(recipe.gain)
             ))
             .style(Style::default().fg(DIM)),
-            Rect::new(inner.x, detail_y + 3, inner.width, 1),
-        );
-    }
-    if room > 4 {
-        frame.render_widget(
-            Paragraph::new(macro_text(&recipe)).style(Style::default().fg(DIM)),
             Rect::new(inner.x, detail_y + 4, inner.width, 1),
         );
     }
     if room > 5 {
-        let source_rows = (source.len() as u16).div_ceil(inner.width).min(room - 5);
+        frame.render_widget(
+            Paragraph::new(macro_text(&recipe)).style(Style::default().fg(DIM)),
+            Rect::new(inner.x, detail_y + 5, inner.width, 1),
+        );
+    }
+    if room > 6 {
+        let source_rows = (source.len() as u16).div_ceil(inner.width).min(room - 6);
         frame.render_widget(
             Paragraph::new(source)
                 .style(Style::default().fg(AMBER))
                 .wrap(Wrap { trim: true }),
-            Rect::new(inner.x, detail_y + 5, inner.width, source_rows),
+            Rect::new(inner.x, detail_y + 6, inner.width, source_rows),
         );
-        let note_row = detail_offset + 5 + source_rows;
+        let note_row = detail_offset + 6 + source_rows;
         frame.render_widget(Paragraph::new("Click/Enter solos a layer. Play mix keeps layer mutes and edits.\nEdit adjusts layer level/filters and event pitch/duration. Each play varies the seed.")
             .style(Style::default().fg(DIM)).wrap(Wrap { trim: true }),
             Rect::new(inner.x, inner.y + note_row, inner.width, inner.height.saturating_sub(note_row)));
@@ -1013,6 +1018,20 @@ fn compact_hz(value: f32) -> String {
         format!("{:.1}k", value / 1000.0)
     } else {
         format!("{value:.0}")
+    }
+}
+
+fn stereo_text(stereo: SfxLayerStereo) -> String {
+    format!("Stereo {stereo}")
+}
+
+fn tonal_rate_text(recipe: &SfxRecipe) -> String {
+    let start = recipe.tonal_rate.start().get();
+    let end = recipe.tonal_rate.end().get();
+    if start == end {
+        format!("{start:.0}Hz fixed")
+    } else {
+        format!("{start:.0}>{end:.0}Hz")
     }
 }
 
@@ -1058,7 +1077,11 @@ fn sequence_text(recipe: &SfxRecipe, layer: &SfxLayerRecipe, width: u16) -> Stri
                 .map(|ratio| format!("{ratio:.2}x"))
                 .collect::<Vec<_>>()
                 .join("/");
-            format!("Tones {}Hz: {pitches}", compact_hz(recipe.tonal_base_hz))
+            format!(
+                "Tones {}Hz: {pitches} | {}",
+                compact_hz(recipe.tonal_base_hz),
+                tonal_rate_text(recipe)
+            )
         }
         SfxLayer::Texture => {
             let pattern = recipe
@@ -1113,9 +1136,10 @@ fn sequence_text(recipe: &SfxRecipe, layer: &SfxLayerRecipe, width: u16) -> Stri
             recipe.phrase.len()
         ),
         SfxLayer::Tonal => format!(
-            "Tones {}Hz, {} slots | M{}",
+            "Tones {}Hz, {} steps {} | M{}",
             compact_hz(recipe.tonal_base_hz),
             recipe.tonal_pitch_ratios.len(),
+            tonal_rate_text(recipe),
             recipe.phrase.len()
         ),
         _ => format!("{sequence} | M{}", recipe.phrase.len()),
@@ -1829,17 +1853,24 @@ fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) ->
     }
     let muted = app.current_edits().layer(app.inspector_layer).state == SfxLayerState::Muted;
     let tonal = app.inspector_layer == SfxLayer::Tonal;
+    let recipe = app.edited_recipe();
+    let selected = recipe
+        .layers
+        .iter()
+        .find(|layer| layer.layer == app.inspector_layer)
+        .expect("every selectable layer has a recipe");
     frame.render_widget(
         Paragraph::new(format!(
-            "{} layer{} | M toggles mute",
+            "{} layer{} | {}",
             app.inspector_layer.label(),
             if muted { " / MUTED" } else { "" },
+            stereo_text(selected.stereo),
         ))
         .style(Style::default().fg(if muted { AMBER } else { CYAN })),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     if tonal {
-        for (page_control, rectangle) in EditorPage::ALL.into_iter().zip(buttons::<3>(Rect::new(
+        for (page_control, rectangle) in EditorPage::ALL.into_iter().zip(buttons::<4>(Rect::new(
             inner.x,
             inner.y + 1,
             inner.width,
@@ -1862,7 +1893,6 @@ fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) ->
             hits.add(rectangle, Control::SfxEditorPage(page_control));
         }
     }
-    let recipe = app.edited_recipe();
     for (index, parameter) in app.editor_parameters().enumerate() {
         let control = Control::SfxParameter(parameter);
         let (current, low, high) = app.numeric(control).expect("SFX parameters are numeric");
@@ -1876,16 +1906,7 @@ fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) ->
                 }
                 TonalParameter::FmIndex => format!("{current:.3}"),
                 TonalParameter::FmRatio => format!("{current:.2}x"),
-                TonalParameter::StepRate => {
-                    if app.current_edits().tonal.step_rate.is_none() {
-                        format!(
-                            "auto {:.0}-{:.0} Hz",
-                            recipe.tonal_rate_hz[0], recipe.tonal_rate_hz[1]
-                        )
-                    } else {
-                        format!("{current:.0} Hz")
-                    }
-                }
+                TonalParameter::RateStart | TonalParameter::RateEnd => format!("{current:.0} Hz"),
                 TonalParameter::Attack | TonalParameter::Release => format!("{current:.2} ms"),
                 TonalParameter::StepPitch(_) => {
                     format!("{current:.2}x / {:.0}Hz", recipe.tonal_base_hz * current)
@@ -1909,6 +1930,13 @@ fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) ->
             &mut hits,
         );
     }
+    if page == EditorPage::Rate {
+        frame.render_widget(
+            Paragraph::new("Clock rate ramps linearly from start to end within each phrase.\nEqual endpoints keep it fixed. Rates count pitch steps per second.")
+                .style(Style::default().fg(CYAN)),
+            Rect::new(inner.x, inner.y + 5, inner.width, 2),
+        );
+    }
     let explanation = if tonal {
         "Sine + sine FM -> six pitch steps -> slot attack/release\n-> event envelope -> HP/LP. Mix pitch/duration affect the whole event."
     } else {
@@ -1920,9 +1948,9 @@ fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) ->
     );
     frame.render_widget(
         Paragraph::new(if tonal {
-            "Arrows adjust; Shift is finer. Space auditions Tonal; Esc closes.\nPgUp/Down pages. Edits apply next play and stay for this session."
+            "Arrows adjust; Shift fine; Space plays Tonal; M mute; Esc closes.\nPgUp/Down pages. Edits apply next play and stay for this session."
         } else {
-            "Arrows adjust; Shift is finer. Space auditions mix; Esc closes.\nEdits apply on the next play and stay for this session."
+            "Arrows adjust; Shift fine; Space plays mix; M mute; Esc closes.\nEdits apply on the next play and stay for this session."
         })
         .style(Style::default().fg(DIM)),
         Rect::new(inner.x, inner.y + 10, inner.width, 2),
@@ -2271,6 +2299,14 @@ mod tests {
                     .map(|cell| cell.symbol())
                     .collect();
                 assert!(text.contains("Edited") && text.contains("[Unmute]"));
+                let recipe = app.edited_recipe();
+                let tonal = recipe
+                    .layers
+                    .iter()
+                    .find(|layer| layer.layer == SfxLayer::Tonal)
+                    .unwrap();
+                assert!(text.contains(&stereo_text(tonal.stereo)));
+                assert!(text.contains(&tonal_rate_text(&recipe)));
 
                 for page in EditorPage::ALL {
                     app.overlay = Overlay::SfxEditor(page);
@@ -2291,6 +2327,7 @@ mod tests {
                         "Sine + sine FM",
                         "Play tone",
                         "Play mix",
+                        "Stereo L/R +/-4ct; rate +/-0.15%",
                     ] {
                         assert!(
                             text.contains(expected),
@@ -2317,15 +2354,19 @@ mod tests {
                             }
                         }
                         EditorPage::Tone => {
-                            for expected in [
-                                "0.080",
-                                "1.50x",
-                                "auto 230-670 Hz",
-                                "0.12 ms",
-                                "0.35 ms",
-                                "Reset tone",
-                            ] {
+                            for expected in ["1.600", "4.70x", "0.12 ms", "0.35 ms", "Reset tone"] {
                                 assert!(text.contains(expected), "missing {expected:?}");
+                            }
+                        }
+                        EditorPage::Rate => {
+                            let recipe = app.edited_recipe();
+                            for expected in [
+                                format!("{:.0} Hz", recipe.tonal_rate.start().get()),
+                                format!("{:.0} Hz", recipe.tonal_rate.end().get()),
+                                "ramps linearly".into(),
+                                "Equal endpoints".into(),
+                            ] {
+                                assert!(text.contains(&expected), "missing {expected:?}");
                             }
                         }
                         EditorPage::Sequence => {
@@ -2431,6 +2472,7 @@ mod tests {
                 .iter()
                 .find(|layer| layer.layer == SfxLayer::Texture)
                 .unwrap();
+            assert!(text.contains(&stereo_text(texture.stereo)));
             assert!(text.contains(&format!("@{}Hz", compact_hz(texture.carrier_hz.unwrap()))));
             for layer in recipe.layers {
                 assert!(text.contains(layer.layer.label()));
@@ -2473,6 +2515,7 @@ mod tests {
             .unwrap();
         assert!(text.contains(&format!("needs {}kHz", shimmer.minimum_sample_rate / 1000)));
         assert!(text.contains(&format!("@{}Hz", compact_hz(shimmer.carrier_hz.unwrap()))));
+        assert!(text.contains(&stereo_text(shimmer.stereo)));
     }
 
     #[test]

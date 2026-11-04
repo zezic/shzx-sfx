@@ -21,8 +21,9 @@ use shzx_sfx::{
     Symbol, Trend, Unit,
 };
 use shzx_sfx::{
-    SfxEdits, SfxFilterBand, SfxLayer, SfxLayerSelection, SfxLayerState, SfxMilliseconds,
-    SfxRecipe, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalSequence, SfxTonalStep,
+    SfxEdits, SfxFilterBand, SfxFmIndex, SfxFmRatio, SfxLayer, SfxLayerSelection, SfxLayerState,
+    SfxMilliseconds, SfxRecipe, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalRate,
+    SfxTonalSequence, SfxTonalStep,
 };
 use strum::IntoEnumIterator;
 
@@ -185,18 +186,18 @@ enum TonalParameter {
     Carrier,
     FmIndex,
     FmRatio,
-    StepRate,
+    RateStart,
+    RateEnd,
     Attack,
     Release,
     StepPitch(SfxTonalStep),
 }
 
 impl TonalParameter {
-    const SYNTHESIS: [Self; 6] = [
+    const SYNTHESIS: [Self; 5] = [
         Self::Carrier,
         Self::FmIndex,
         Self::FmRatio,
-        Self::StepRate,
         Self::Attack,
         Self::Release,
     ];
@@ -206,7 +207,8 @@ impl TonalParameter {
             Self::Carrier => "Carrier tuning",
             Self::FmIndex => "FM index",
             Self::FmRatio => "FM ratio",
-            Self::StepRate => "Step rate",
+            Self::RateStart => "Rate start",
+            Self::RateEnd => "Rate end",
             Self::Attack => "Slot attack",
             Self::Release => "Slot release",
             Self::StepPitch(step) => step.label(),
@@ -218,16 +220,18 @@ impl TonalParameter {
 enum EditorPage {
     Mix,
     Tone,
+    Rate,
     Sequence,
 }
 
 impl EditorPage {
-    const ALL: [Self; 3] = [Self::Mix, Self::Tone, Self::Sequence];
+    const ALL: [Self; 4] = [Self::Mix, Self::Tone, Self::Rate, Self::Sequence];
 
     fn label(self) -> &'static str {
         match self {
             Self::Mix => "Mix",
             Self::Tone => "Synthesis",
+            Self::Rate => "Rate",
             Self::Sequence => "Sequence",
         }
     }
@@ -236,11 +240,15 @@ impl EditorPage {
         SfxParameter::ALL
             .into_iter()
             .chain(TonalParameter::SYNTHESIS.map(SfxParameter::Tonal))
+            .chain([TonalParameter::RateStart, TonalParameter::RateEnd].map(SfxParameter::Tonal))
             .chain(
                 SfxTonalStep::ALL.map(|step| SfxParameter::Tonal(TonalParameter::StepPitch(step))),
             )
             .filter(move |parameter| match parameter {
                 SfxParameter::Tonal(TonalParameter::StepPitch(_)) => self == Self::Sequence,
+                SfxParameter::Tonal(TonalParameter::RateStart | TonalParameter::RateEnd) => {
+                    self == Self::Rate
+                }
                 SfxParameter::Tonal(_) => self == Self::Tone,
                 _ => self == Self::Mix,
             })
@@ -809,12 +817,19 @@ impl App {
                             TonalParameter::Carrier => {
                                 (tonal.carrier.get(), SfxScale::MIN, SfxScale::MAX)
                             }
-                            TonalParameter::FmIndex => (tonal.fm_index.get(), 0.0, 1.0),
-                            TonalParameter::FmRatio => {
-                                (tonal.fm_ratio.get(), SfxScale::MIN, SfxScale::MAX)
+                            TonalParameter::FmIndex => {
+                                (tonal.fm_index.get(), SfxFmIndex::MIN, SfxFmIndex::MAX)
                             }
-                            TonalParameter::StepRate => (
-                                (recipe.tonal_rate_hz[0] + recipe.tonal_rate_hz[1]) * 0.5,
+                            TonalParameter::FmRatio => {
+                                (tonal.fm_ratio.get(), SfxFmRatio::MIN, SfxFmRatio::MAX)
+                            }
+                            TonalParameter::RateStart => (
+                                recipe.tonal_rate.start().get(),
+                                SfxStepRate::MIN_HZ,
+                                SfxStepRate::MAX_HZ,
+                            ),
+                            TonalParameter::RateEnd => (
+                                recipe.tonal_rate.end().get(),
                                 SfxStepRate::MIN_HZ,
                                 SfxStepRate::MAX_HZ,
                             ),
@@ -920,15 +935,21 @@ impl App {
                         }
                         TonalParameter::FmIndex => {
                             edits.tonal.fm_index =
-                                Unit::new(next).expect("FM index slider is normalized")
+                                SfxFmIndex::new(next).expect("FM index slider is bounded")
                         }
                         TonalParameter::FmRatio => {
                             edits.tonal.fm_ratio =
-                                SfxScale::new(next).expect("FM ratio slider is bounded")
+                                SfxFmRatio::new(next).expect("FM ratio slider is bounded")
                         }
-                        TonalParameter::StepRate => {
-                            edits.tonal.step_rate =
-                                Some(SfxStepRate::new(next).expect("step rate slider is bounded"))
+                        TonalParameter::RateStart | TonalParameter::RateEnd => {
+                            let rate = self.edited_recipe().tonal_rate;
+                            let next = SfxStepRate::new(next).expect("step rate slider is bounded");
+                            let (start, end) = if parameter == TonalParameter::RateStart {
+                                (next, rate.end())
+                            } else {
+                                (rate.start(), next)
+                            };
+                            edits.tonal.step_rate = Some(SfxTonalRate::Sweep { start, end });
                         }
                         TonalParameter::Attack => {
                             edits.tonal.attack =
@@ -1173,8 +1194,10 @@ impl App {
             Control::OutputGain => (1.0, 0.25),
             Control::SfxParameter(SfxParameter::Highpass | SfxParameter::Lowpass) => (100.0, 10.0),
             Control::SfxParameter(SfxParameter::Level) => (0.01, 0.001),
-            Control::SfxParameter(SfxParameter::Tonal(TonalParameter::FmIndex)) => (0.01, 0.001),
-            Control::SfxParameter(SfxParameter::Tonal(TonalParameter::StepRate)) => (10.0, 1.0),
+            Control::SfxParameter(SfxParameter::Tonal(TonalParameter::FmIndex)) => (0.1, 0.01),
+            Control::SfxParameter(SfxParameter::Tonal(
+                TonalParameter::RateStart | TonalParameter::RateEnd,
+            )) => (10.0, 1.0),
             Control::SfxParameter(SfxParameter::Tonal(
                 TonalParameter::Attack | TonalParameter::Release,
             )) => (0.05, 0.01),

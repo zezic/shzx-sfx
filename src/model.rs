@@ -825,6 +825,148 @@ impl From<SfxStepRate> for f32 {
     }
 }
 
+/// A fixed rate retains the numeric JSON form; a sweep integrates a linear
+/// rate envelope across each macro phrase part.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum SfxTonalRate {
+    Fixed(SfxStepRate),
+    Sweep {
+        start: SfxStepRate,
+        end: SfxStepRate,
+    },
+}
+
+impl SfxTonalRate {
+    #[must_use]
+    pub const fn start(self) -> SfxStepRate {
+        match self {
+            Self::Fixed(rate) | Self::Sweep { start: rate, .. } => rate,
+        }
+    }
+
+    #[must_use]
+    pub const fn end(self) -> SfxStepRate {
+        match self {
+            Self::Fixed(rate) | Self::Sweep { end: rate, .. } => rate,
+        }
+    }
+
+    pub(crate) fn at_time(self, time: f32, duration: f32) -> f32 {
+        match self {
+            Self::Fixed(rate) => rate.get(),
+            Self::Sweep { start, end } => {
+                start.get() + (end.get() - start.get()) * (time / duration)
+            }
+        }
+    }
+
+    pub(crate) fn cycles(self, time: f32, duration: f32) -> f64 {
+        let time = f64::from(time);
+        match self {
+            Self::Fixed(rate) => f64::from(rate.get()) * time,
+            Self::Sweep { start, end } => {
+                (f64::from(start.get())
+                    + 0.5 * f64::from(end.get() - start.get()) * (time / f64::from(duration)))
+                    * time
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for SfxTonalRate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fixed(rate) => write!(formatter, "{:.0} Hz fixed", rate.get()),
+            Self::Sweep { start, end } => {
+                write!(formatter, "{:.0}->{:.0} Hz linear", start.get(), end.get())
+            }
+        }
+    }
+}
+
+/// FM modulation depth in multiples of the modulator frequency.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct SfxFmIndex(f32);
+
+impl SfxFmIndex {
+    pub const MIN: f32 = 0.0;
+    pub const MAX: f32 = 8.0;
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "SFX FM index",
+                value: value as f64,
+                expected: "a finite modulation index in 0..=8",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for SfxFmIndex {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SfxFmIndex> for f32 {
+    fn from(value: SfxFmIndex) -> Self {
+        value.get()
+    }
+}
+
+/// Ratio of the FM modulator frequency to its carrier frequency.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct SfxFmRatio(f32);
+
+impl SfxFmRatio {
+    pub const MIN: f32 = 0.25;
+    pub const MAX: f32 = 12.0;
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "SFX FM ratio",
+                value: value as f64,
+                expected: "a finite frequency ratio in 0.25..=12",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for SfxFmRatio {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SfxFmRatio> for f32 {
+    fn from(value: SfxFmRatio) -> Self {
+        value.get()
+    }
+}
+
 /// Positive envelope timing in milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
@@ -899,7 +1041,7 @@ impl SfxTonalStep {
         }
     }
 
-    pub(crate) fn at_clock(clock: f32) -> Self {
+    pub(crate) fn at_clock(clock: f64) -> Self {
         match clock as usize % 6 {
             0 => Self::One,
             1 => Self::Two,
@@ -973,9 +1115,9 @@ impl Default for SfxTonalSequence {
 #[serde(default, deny_unknown_fields)]
 pub struct SfxTonalEdits {
     pub carrier: SfxScale,
-    pub fm_index: Unit,
-    pub fm_ratio: SfxScale,
-    pub step_rate: Option<SfxStepRate>,
+    pub fm_index: SfxFmIndex,
+    pub fm_ratio: SfxFmRatio,
+    pub step_rate: Option<SfxTonalRate>,
     pub attack: SfxMilliseconds,
     pub release: SfxMilliseconds,
     pub pitch_ratios: Option<SfxTonalSequence>,
@@ -983,9 +1125,9 @@ pub struct SfxTonalEdits {
 
 impl SfxTonalEdits {
     pub const DEFAULT: Self = Self {
-        carrier: SfxScale::ONE,
-        fm_index: Unit(0.08),
-        fm_ratio: SfxScale(1.5),
+        carrier: SfxScale(0.52),
+        fm_index: SfxFmIndex(1.6),
+        fm_ratio: SfxFmRatio(4.7),
         step_rate: None,
         attack: SfxMilliseconds(0.12),
         release: SfxMilliseconds(0.35),

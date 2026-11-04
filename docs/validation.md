@@ -1,12 +1,12 @@
 # Engine validation
 
-Checked on 2026-11-04 on an Apple M4 MacBook Pro with Rust 1.98.1.
+Checked on 2026-11-05 on an Apple M4 MacBook Pro with Rust 1.98.1.
 These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- `cargo test --all-targets --release --locked --offline`: 104 tests passed.
-- `cargo test --no-default-features --release --locked --offline`: 71 tests passed.
+- `cargo test --all-targets --release --locked --offline`: 110 tests passed.
+- `cargo test --no-default-features --release --locked --offline`: 76 tests passed.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
 - The scoped allocator audit includes first rendering, all effect families,
@@ -38,15 +38,15 @@ intensity 0.6:
 
 | Signal | Peak | RMS in the measured window |
 | --- | ---: | ---: |
-| Click, isolated UI after comfort EQ | -7.67 dBFS | -28.12 dBFS |
-| Confirm, isolated UI after comfort EQ | -11.25 dBFS | -26.78 dBFS |
-| Order fill, isolated UI after comfort EQ | -8.38 dBFS | -26.14 dBFS |
+| Click, isolated UI after comfort EQ | -5.89 dBFS | -27.62 dBFS |
+| Confirm, isolated UI after comfort EQ | -9.60 dBFS | -26.74 dBFS |
+| Order fill, isolated UI after comfort EQ | -5.65 dBFS | -26.47 dBFS |
 | Full environment, 1-3 seconds | -13.51 dBFS | -24.09 dBFS |
 | Texture alone, 1-3 seconds | -18.37 dBFS | -31.68 dBFS |
 | Harmony alone, intro window | -26.57 dBFS | -37.23 dBFS |
 | Melody alone, active source | -20.40 dBFS | -27.09 dBFS |
 
-The loudest default effect in the current 37-effect sweep peaked at -3.22 dBFS.
+The loudest default effect in the current 37-effect sweep peaked at -2.39 dBFS.
 The output is linear below its stereo-linked soft knee and approaches a 0.95
 sample ceiling under overload. This is a sample ceiling, not a true-peak meter.
 A 0-to-+6 dB boost comparison below the knee had 0.0401% relative waveform RMS
@@ -254,3 +254,50 @@ edited triggers remain allocation-free. A 74.25-second palette export of all
 37 default events, seed 123 at 48 kHz with two-second spacing and reverb tails,
 was bitwise identical to a separate build of the preceding code. It measured
 peak 0.792593 and RMS 0.013188.
+
+## Richer palette and intrinsic stereo
+
+The palette uses 0.52x Tonal carrier tuning, FM index 1.6, and modulator ratio
+4.7x. Family-specific six-step patterns span 0.3-3.8x. Each phrase part has a
+linear clock ramp: contact 760->190 Hz, digital 140->980 Hz, servo 540->85 Hz,
+and air 90->420 Hz. Rate edits expose both endpoints; equal endpoints hold a
+constant rate, and numeric fixed-rate values in existing JSON still parse.
+Flecks use 12-17 kHz low-pass cutoffs and 7-15% nominal layer levels.
+
+Tonal uses independent L/R oscillator and filter histories with +/-4-cent
+tuning and +/-0.15% clock-rate offsets. Flecks, Shimmer, and Crisp blend
+submillisecond delayed copies with their direct signal. Tests reconstruct
+the stereo event from all six solos through pan and Haas, check center width
+and mono fold-down at 8/48/192 kHz, and verify that unsupported high bands
+stay silent. Analytic clock tests check ramp endpoints, integrated cycle
+count, derivative, and strictly forward sample progression during long ramps.
+Delay tests cover exact retirement and cleared taps after voice stealing.
+The allocator audit exercises maximum FM settings and both ramp directions
+at 8/48/192 kHz with zero allocations and deallocations after construction.
+
+A matched centered palette comparison uses seed 123, 48 kHz, one variation
+per effect, and two-second spacing, including the default reverb and gaps.
+The 74.25-second exports measured:
+
+| Measurement | Before tuning/spread | Richer stereo palette |
+| --- | ---: | ---: |
+| Peak | 0.792593 (-2.02 dBFS) | 0.741616 (-2.60 dBFS) |
+| RMS including gaps | 0.013188 (-37.60 dBFS) | 0.012606 (-37.99 dBFS) |
+| L/R correlation | 0.99987 | 0.66187 |
+| Mono energy / mean channel energy | 99.99% | 83.09% |
+| Spectral centroid | 1867 Hz | 2654 Hz |
+
+The stereo palette gains upper-band detail and width while its full-file RMS
+changes by less than 0.4 dB. A dry Confirm Tonal comparison measured RMS
+0.012501 before and 0.012266 after, with L/R correlation changing from 1.0
+to 0.3848. No gain normalization was applied to these exports.
+
+All four Tonal editor pages and the stereo recipe readouts were visually
+checked at 80x24. The 12.5-second SFX-only audition uses seven representative
+events with centered and panned positions, peaking at -4.07 dBFS and measuring
+-34.77 dBFS RMS including gaps.
+
+The 30-second interactive benchmark rendered in 0.958497 seconds (3.195% of
+realtime wall time) at 48 kHz, 256-frame blocks, and 32 available voices. A
+separate preceding-build run measured 0.949178 seconds (3.164%). These offline
+measurements exclude device scheduling and native callback utilization.

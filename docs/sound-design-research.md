@@ -222,8 +222,8 @@ the next chord choice within that base.
 Routine event durations are reduced by approximately 35%. Orders, dialogs, alerts, and connection
 signatures retain their longer structures. Short clean oscillator flecks
 alternate with FM, PM, sync, pulse/folded, ring, crushed, and noise components.
-Articulated LP/HP profiles shape the main body; a separate quiet high-pass
-path supplies brief 1.6-3.3 kHz HP / 4.8-7.8 kHz LP flecks. Bright components
+Articulated LP/HP profiles shape the main body; a separate high-pass
+path supplies brief 1.6-3.3 kHz HP / 12-17 kHz LP flecks at 7-15% level. Bright components
 end within milliseconds. Main pitch is fixed or settles at onset; no medium
 pitch sweep is mixed into a full-band event.
 
@@ -245,27 +245,42 @@ transitions happen.
 
 ## Auditable event layers
 
-The event voice has five explicit paths: a clean muted Body; attenuated
-nonlinear Texture; high-passed low-index FM Tonal micro-sequences; short
-filtered-noise Flecks; and quiet high-HP phase-modulated Shimmer. Texture
+The event voice has six explicit paths: a clean muted Body; attenuated
+nonlinear Texture; high-passed FM Tonal micro-sequences; short
+filtered-noise Flecks; quiet high-HP phase-modulated Shimmer; and high-band
+intermodulated Crisp. Texture
 contains the folded PM, FM, sync, pulse, quantized/ring, and held-noise
 material, making its contribution directly soloable instead of buried inside
 other named components. Its relative amplitude is 0.25.
 
-Tonal slots use a 1.2 kHz HP and 8 kHz LP, FM index 0.08, and a 1.5x
-modulator ratio, with short ratio sequences selected by interaction family.
+Tonal slots use a 1.2 kHz HP and 8 kHz LP, carrier tuning 0.52x, FM index 1.6,
+and a 4.7x modulator ratio. Six-step patterns span approximately 0.3-3.8x,
+with different orders selected by interaction family.
 Shimmer uses a 7.2 kHz HP and 16 kHz LP around a nominal 8.4-12.5 kHz carrier,
 PM depth 0.035 cycles at 0.7 Hz, and a short bounded window. It is disabled
 below 20 kHz sample rate. Filter bands are clamped for the actual sample rate.
 
 The Tonal editor exposes the sine carrier's tuning, FM index and modulator
-ratio, six pitch ratios, a separate step rate, and slot attack/release. Its
+ratio, six pitch ratios, a separate rate envelope, and slot attack/release. Its
 signal passes through the slot gate, the event envelope, and the Tonal HP/LP
-filters. The default clock follows the seeded 230-670 Hz detail rate and
-starting position; an edited rate changes only Tonal. Carrier and sequence
+filters. Default rate contours are 760->190 Hz for contact, 140->980 Hz for
+digital, 540->85 Hz for servo, and 90->420 Hz for air. The linear envelope
+restarts on each macro phrase part. Clock phase integrates that rate rather
+than multiplying elapsed time by the instantaneous rate. The starting
+position remains seeded; edits to this clock change only Tonal, while
+Texture retains its own grain clock. Carrier and sequence
 ratios remain relative to the event's pitch, preserving whole-event
 transposition while allowing Tonal to be tuned independently. Resetting its
 synthesis retains its level, mute, and filter settings.
+
+Tonal has independent stereo oscillator and filter histories, with +/-4-cent
+tuning and +/-0.15% sequence-rate offsets. Flecks, Shimmer, and Crisp use
+0/0.24 ms, 0.32/0 ms, and 0/0.16 ms L/R delays, blended at 25%, 20%, and 22%
+with the direct signal. Their delay state is allocated with the voice pool,
+flushed when a slot starts a new event, and included in voice retirement.
+Pan and optional positional Haas crossfeed follow the stereo layer sum.
+Keeping a dominant direct component limits mono fold-down cancellation from
+the delayed paths. [Smith: Feedforward Comb Filters](https://ccrma.stanford.edu/~jos/pasp/Feedforward_Comb_Filters.html)
 
 Recipe metadata comes from the same profiles used by rendering: relative
 gains, carriers, filters and gestures, envelope timing, per-kind patch
