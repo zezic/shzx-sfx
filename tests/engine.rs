@@ -48,6 +48,7 @@ fn external_numeric_and_serialized_inputs_preserve_their_domains() {
     );
     let command = Command::Trigger(SfxEvent {
         layers: shzx_sfx::SfxLayerSelection::All,
+        edits: shzx_sfx::SfxEdits::DEFAULT,
         kind: SfxKind::OrderFill,
         pan: Pan::new(-0.7).unwrap(),
         intensity: unit(0.4),
@@ -202,6 +203,7 @@ fn bursts_and_live_parameter_changes_stay_finite_and_bounded() {
             for kind in SfxKind::iter() {
                 renderer.apply(Command::Trigger(SfxEvent {
                     layers: shzx_sfx::SfxLayerSelection::All,
+                    edits: shzx_sfx::SfxEdits::DEFAULT,
                     kind,
                     intensity: Unit::ONE,
                     pan: Pan::new(if cycle % 20 == 0 { -1.0 } else { 1.0 }).unwrap(),

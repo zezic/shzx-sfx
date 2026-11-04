@@ -1,7 +1,10 @@
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use crate::dsp::{HighPass, LowPass, SineTable};
-use crate::{GeneratedEvent, SFX_EQ, SfxEq, SfxEvent, SfxKind, SfxLayerSelection, SpatialMode};
+use crate::{
+    GeneratedEvent, SFX_EQ, SfxEdits, SfxEq, SfxEvent, SfxFilterBand, SfxKind, SfxLayerSelection,
+    SfxLayerState, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalStep, SpatialMode,
+};
 
 /// Independently auditable components of an event voice.
 #[derive(
@@ -210,11 +213,26 @@ pub struct SfxRecipe {
     pub micro_pattern: &'static [SfxDetail],
     pub detail_rate_hz: [f32; 2],
     pub hold_rate_hz: [f32; 2],
-    pub tonal_pitch_ratios: &'static [f32],
+    pub tonal_pitch_ratios: [f32; 6],
+    pub tonal_rate_hz: [f32; 2],
     pub tonal_base_hz: f32,
     pub filter_gesture: SfxFilterGesture,
     pub fleck_bursts: &'static [SfxBurst],
     pub layers: [SfxLayerRecipe; 6],
+}
+
+impl SfxRecipe {
+    #[must_use]
+    pub fn tonal_pitch_ratio(&self, step: SfxTonalStep) -> f32 {
+        match step {
+            SfxTonalStep::One => self.tonal_pitch_ratios[0],
+            SfxTonalStep::Two => self.tonal_pitch_ratios[1],
+            SfxTonalStep::Three => self.tonal_pitch_ratios[2],
+            SfxTonalStep::Four => self.tonal_pitch_ratios[3],
+            SfxTonalStep::Five => self.tonal_pitch_ratios[4],
+            SfxTonalStep::Six => self.tonal_pitch_ratios[5],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -306,8 +324,6 @@ const SYNC_RATIO: f32 = 2.37;
 const PULSE_DUTY: f32 = 0.24;
 const FOLD_BASE_RADIANS: f32 = 1.2;
 const FOLD_DEPTH_RADIANS: f32 = 1.8;
-const TONAL_FM_INDEX: f32 = 0.08;
-const TONAL_FM_RATIO: f32 = 1.5;
 const SHIMMER_PM_CYCLES: f32 = 0.035;
 const SHIMMER_MOD_HZ: f32 = 0.7;
 
@@ -706,6 +722,8 @@ impl PitchEnvelope {
 struct Recipe {
     patch: SfxPatch,
     pitch_hz: f32,
+    pitch_scale: SfxScale,
+    tonal: SfxTonalEdits,
     duration: f32,
     pitch: PitchEnvelope,
     gain: f32,
@@ -720,6 +738,8 @@ impl Recipe {
         Self {
             patch: SfxPatch::Contact { metal },
             pitch_hz,
+            pitch_scale: SfxScale::ONE,
+            tonal: SfxTonalEdits::DEFAULT,
             duration,
             pitch: PitchEnvelope::Settle {
                 semitones: 1.5,
@@ -740,6 +760,8 @@ impl Recipe {
                 gate_hz,
             },
             pitch_hz,
+            pitch_scale: SfxScale::ONE,
+            tonal: SfxTonalEdits::DEFAULT,
             duration,
             pitch: PitchEnvelope::Fixed,
             gain: 0.13,
@@ -754,6 +776,8 @@ impl Recipe {
         Self {
             patch: SfxPatch::Servo { friction },
             pitch_hz,
+            pitch_scale: SfxScale::ONE,
+            tonal: SfxTonalEdits::DEFAULT,
             duration,
             pitch: PitchEnvelope::Settle {
                 semitones: 0.75,
@@ -771,6 +795,8 @@ impl Recipe {
         Self {
             patch: SfxPatch::Air,
             pitch_hz,
+            pitch_scale: SfxScale::ONE,
+            tonal: SfxTonalEdits::DEFAULT,
             duration,
             pitch: PitchEnvelope::Fixed,
             gain: 0.075,
@@ -876,7 +902,44 @@ impl Recipe {
 }
 
 impl Recipe {
+    fn for_event(event: SfxEvent) -> Self {
+        let mut recipe = Self::for_kind(event.kind);
+        recipe.pitch_scale = event.edits.pitch;
+        recipe.duration *= event.edits.duration.get();
+        recipe.tonal = event.edits.tonal;
+        recipe
+    }
+
+    fn tonal_rate_hz(self) -> [f32; 2] {
+        self.tonal
+            .step_rate
+            .map_or(DETAIL_RATE_HZ, |rate| [rate.get(); 2])
+    }
+
+    fn tonal_pitch_ratios(self) -> [f32; 6] {
+        match self.tonal.pitch_ratios {
+            Some(sequence) => SfxTonalStep::ALL.map(|step| sequence.get(step).get()),
+            None => *self.patch.tonal_ratios(),
+        }
+    }
+
+    fn layer_cutoffs(self, band: Option<SfxFilterBand>, time: f32, base_cutoff: f32) -> (f32, f32) {
+        let (lowpass, highpass) = self.articulation.filter.cutoffs(time, base_cutoff);
+        match band {
+            Some(band) => {
+                let (nominal_lowpass, nominal_highpass) =
+                    self.articulation.filter.cutoffs(0.0, self.cutoff);
+                (
+                    lowpass / nominal_lowpass * band.lowpass_hz(),
+                    highpass / nominal_highpass * band.highpass_hz(),
+                )
+            }
+            None => (lowpass, highpass),
+        }
+    }
+
     fn layers(self) -> [SfxLayerRecipe; 6] {
+        let pitch = self.pitch_scale;
         let (lp, hp) = self.articulation.filter.cutoffs(0.0, self.cutoff);
         let shortest_part = self
             .steps
@@ -885,14 +948,14 @@ impl Recipe {
             .fold(self.duration, f32::min);
         let shimmer_ms = (shortest_part * 550.0).clamp(6.0, 72.0);
         let ratios = self.patch.ratios();
-        let crisp = self.patch.crisp();
+        let crisp = self.patch.crisp().scaled(pitch);
         [
             SfxLayerRecipe {
                 layer: SfxLayer::Body,
                 level: 0.35,
                 highpass_hz: hp,
                 lowpass_hz: lp,
-                carrier_hz: Some(self.pitch_hz),
+                carrier_hz: Some(self.pitch_hz * pitch.get()),
                 attack_ms: self.amplitude.attack * 1000.0,
                 release_ms: self.amplitude.release * 1000.0,
                 start_ms: 0.0,
@@ -906,7 +969,7 @@ impl Recipe {
                 level: 0.25,
                 highpass_hz: hp,
                 lowpass_hz: lp,
-                carrier_hz: Some(self.pitch_hz),
+                carrier_hz: Some(self.pitch_hz * pitch.get()),
                 attack_ms: self.amplitude.attack * 1000.0,
                 release_ms: self.amplitude.release * 1000.0,
                 start_ms: 0.0,
@@ -929,16 +992,16 @@ impl Recipe {
                 level: 0.28,
                 highpass_hz: 1_200.0,
                 lowpass_hz: 8_000.0,
-                carrier_hz: Some((self.pitch_hz * 3.8).clamp(1_500.0, 3_000.0)),
-                attack_ms: 0.12,
-                release_ms: 0.35,
+                carrier_hz: Some(tonal_carrier(self.pitch_hz, pitch) * self.tonal.carrier.get()),
+                attack_ms: self.tonal.attack.get(),
+                release_ms: self.tonal.release.get(),
                 start_ms: 0.0,
-                duration_ms: 2000.0 / (DETAIL_RATE_HZ[0] + DETAIL_RATE_HZ[1]),
+                duration_ms: 2000.0 / self.tonal_rate_hz().iter().sum::<f32>(),
                 minimum_sample_rate: 8_000,
                 generator: SfxGenerator::TonalSequence,
                 modulation: Some(SfxModulation::Fm {
-                    index: TONAL_FM_INDEX,
-                    ratio: TONAL_FM_RATIO,
+                    index: self.tonal.fm_index.get(),
+                    ratio: self.tonal.fm_ratio.get(),
                 }),
             },
             SfxLayerRecipe {
@@ -966,7 +1029,7 @@ impl Recipe {
                 level: 0.018,
                 highpass_hz: 7_200.0,
                 lowpass_hz: 16_000.0,
-                carrier_hz: Some((self.pitch_hz * 15.7).clamp(8_400.0, 12_500.0)),
+                carrier_hz: Some(shimmer_carrier(self.pitch_hz, pitch)),
                 attack_ms: 2.5,
                 release_ms: 4.0,
                 start_ms: 3.0,
@@ -1007,11 +1070,37 @@ impl Recipe {
 impl SfxKind {
     #[must_use]
     pub fn recipe(self) -> SfxRecipe {
-        let recipe = Recipe::for_kind(self);
+        Recipe::for_kind(self).describe(self, SfxEdits::DEFAULT)
+    }
+}
+
+impl SfxEvent {
+    /// Effective nominal recipe before seeded variation. Muting preserves levels
+    /// so the inspector can restore a layer without losing its settings.
+    #[must_use]
+    pub fn recipe(self) -> SfxRecipe {
+        Recipe::for_event(self).describe(self.kind, self.edits)
+    }
+}
+
+impl Recipe {
+    fn describe(self, kind: SfxKind, edits: SfxEdits) -> SfxRecipe {
+        let recipe = self;
+        let mut layers = recipe.layers();
+        for layer in &mut layers {
+            let edit = edits.layer(layer.layer);
+            if let Some(level) = edit.level {
+                layer.level = level.get();
+            }
+            if let Some(band) = edit.filter {
+                layer.highpass_hz = band.highpass_hz();
+                layer.lowpass_hz = band.lowpass_hz();
+            }
+        }
         SfxRecipe {
-            kind: self,
+            kind,
             patch: recipe.patch,
-            pitch_hz: recipe.pitch_hz,
+            pitch_hz: recipe.pitch_hz * recipe.pitch_scale.get(),
             duration_seconds: recipe.duration,
             gain: recipe.gain,
             eq: SFX_EQ,
@@ -1032,13 +1121,23 @@ impl SfxKind {
             micro_pattern: recipe.patch.details(),
             detail_rate_hz: DETAIL_RATE_HZ,
             hold_rate_hz: HOLD_RATE_HZ,
-            tonal_pitch_ratios: recipe.patch.tonal_ratios(),
-            tonal_base_hz: (recipe.pitch_hz * 3.8).clamp(1_500.0, 3_000.0),
+            tonal_pitch_ratios: recipe.tonal_pitch_ratios(),
+            tonal_rate_hz: recipe.tonal_rate_hz(),
+            tonal_base_hz: tonal_carrier(recipe.pitch_hz, recipe.pitch_scale)
+                * recipe.tonal.carrier.get(),
             filter_gesture: recipe.articulation.filter,
             fleck_bursts: recipe.articulation.flecks.bursts(),
-            layers: recipe.layers(),
+            layers,
         }
     }
+}
+
+fn tonal_carrier(pitch_hz: f32, scale: SfxScale) -> f32 {
+    (pitch_hz * 3.8).clamp(1_500.0, 3_000.0) * scale.get()
+}
+
+fn shimmer_carrier(pitch_hz: f32, scale: SfxScale) -> f32 {
+    (pitch_hz * 15.7).clamp(8_400.0, 12_500.0) * scale.get()
 }
 
 struct StepState {
@@ -1085,7 +1184,7 @@ impl StepState {
         rng: &mut fastrand::Rng,
         table: &SineTable,
     ) -> SourceParts {
-        let frequency = pitch_hz * recipe.pitch.ratio(time);
+        let frequency = pitch_hz * recipe.pitch_scale.get() * recipe.pitch.ratio(time);
         let ratios = recipe.patch.ratios();
         let previous_master = self.phase[0];
         for (phase, ratio) in self.phase.iter_mut().zip(ratios) {
@@ -1182,18 +1281,34 @@ impl StepState {
             SfxPatch::Servo { .. } => partials[0] * 0.17 + table.at(self.sync_phase) * 0.04,
             SfxPatch::Air => partials[0] * 0.05,
         };
-        let tonal_hz = ((pitch_hz * 3.8).clamp(1_500.0, 3_000.0)
-            * recipe.patch.tonal_ratios()[clock as usize % 6])
+        let tonal_rate = recipe
+            .tonal
+            .step_rate
+            .map_or(self.detail_rate, SfxStepRate::get);
+        let tonal_clock = time * tonal_rate + self.detail_offset;
+        let tonal_grain_phase = tonal_clock.fract();
+        let tonal_ratio = match recipe.tonal.pitch_ratios {
+            Some(sequence) => sequence.get(SfxTonalStep::at_clock(tonal_clock)).get(),
+            None => recipe.patch.tonal_ratios()[tonal_clock as usize % 6],
+        };
+        let tonal_hz = (tonal_carrier(pitch_hz, recipe.pitch_scale)
+            * recipe.tonal.carrier.get()
+            * tonal_ratio)
             .min(sample_rate * 0.36);
-        let modulator_hz = (tonal_hz * TONAL_FM_RATIO).min(sample_rate * 0.42);
+        let modulator_hz = (tonal_hz * recipe.tonal.fm_ratio.get()).min(sample_rate * 0.42);
         self.tonal_mod_phase = (self.tonal_mod_phase + modulator_hz / sample_rate).fract();
-        self.tonal_phase = (self.tonal_phase
-            + (tonal_hz + table.at(self.tonal_mod_phase) * TONAL_FM_INDEX * modulator_hz)
+        let phase = (self.tonal_phase
+            + (tonal_hz
+                + table.at(self.tonal_mod_phase) * recipe.tonal.fm_index.get() * modulator_hz)
                 / sample_rate)
             .fract();
-        let slot_seconds = 1.0 / self.detail_rate;
-        let slot_envelope = (grain_phase * slot_seconds / 0.00012).min(1.0)
-            * ((1.0 - grain_phase) * slot_seconds / 0.00035).min(1.0);
+        self.tonal_phase = if phase < 0.0 { phase + 1.0 } else { phase };
+        let slot_seconds = 1.0 / tonal_rate;
+        let slot_envelope = (tonal_grain_phase * slot_seconds
+            / (recipe.tonal.attack.get() / 1000.0))
+            .min(1.0)
+            * ((1.0 - tonal_grain_phase) * slot_seconds / (recipe.tonal.release.get() / 1000.0))
+                .min(1.0);
         SourceParts {
             body,
             texture: dirty_body * 0.35 + grain * 0.85 + onset,
@@ -1205,6 +1320,7 @@ impl StepState {
         &mut self,
         time: f32,
         pitch_hz: f32,
+        pitch_scale: SfxScale,
         profile: SfxLayerRecipe,
         sample_rate: f32,
         table: &SineTable,
@@ -1219,9 +1335,7 @@ impl StepState {
         }
         let envelope = (age / (profile.attack_ms * 0.001)).min(1.0)
             * ((duration - age) / (profile.release_ms * 0.001)).min(1.0);
-        let carrier = (pitch_hz * 15.7)
-            .clamp(8_400.0, 12_500.0)
-            .min(sample_rate * 0.4);
+        let carrier = shimmer_carrier(pitch_hz, pitch_scale).min(sample_rate * 0.4);
         self.shimmer_phase = (self.shimmer_phase + carrier / sample_rate).fract();
         self.shimmer_mod_phase = (self.shimmer_mod_phase + SHIMMER_MOD_HZ / sample_rate).fract();
         table.at(
@@ -1297,6 +1411,14 @@ struct CrispParameters {
     noise_lowpass_hz: f32,
     ratchet_hz: f32,
     level: f32,
+}
+
+impl CrispParameters {
+    fn scaled(mut self, pitch: SfxScale) -> Self {
+        self.low_hz = self.low_hz.map(|hz| hz * pitch.get());
+        self.high_hz = self.high_hz.map(|hz| hz * pitch.get());
+        self
+    }
 }
 
 fn parameter_contour(values: [f32; 3], progress: f32) -> f32 {
@@ -1491,7 +1613,7 @@ impl LayerSamples {
 
 struct Voice {
     recipe: Recipe,
-    pitch_hz: f32,
+    nominal_pitch_hz: f32,
     duration: f32,
     age: u32,
     end_frame: u32,
@@ -1513,36 +1635,50 @@ struct Voice {
     layers: SfxLayerSelection,
     profiles: LayerProfiles,
     base_cutoff: f32,
+    body_band: Option<SfxFilterBand>,
+    texture_band: Option<SfxFilterBand>,
     filter_interval: u32,
 }
 
 impl Voice {
     fn new(event: SfxEvent, sample_rate: u32, seed: u64, started: u64) -> (Self, GeneratedEvent) {
         let mut rng = fastrand::Rng::with_seed(seed);
-        let recipe = Recipe::for_kind(event.kind);
+        let recipe = Recipe::for_event(event);
         let duration = recipe.duration * (0.92 + rng.f32() * 0.16);
         let sample_rate = sample_rate as f32;
-        let pitch_hz = (recipe.pitch_hz * (0.955 + rng.f32() * 0.09)).min(sample_rate * 0.08);
+        let pitch_hz = (recipe.pitch_hz * recipe.pitch_scale.get() * (0.955 + rng.f32() * 0.09))
+            .min(sample_rate * 0.08);
         let pan = event.pan.get();
         let angle = (pan + 1.0) * FRAC_PI_4;
         let delay_frames = ((0.002 + 0.006 * pan.abs()) * sample_rate).round() as usize;
         let end_frame = ((duration + recipe.articulation.filter_tail) * sample_rate).ceil() as u32
             + delay_frames as u32;
         let base_cutoff = recipe.cutoff * (0.94 + rng.f32() * 0.12);
-        let (cutoff, highpass) = recipe.articulation.filter.cutoffs(0.0, base_cutoff);
+        let (cutoff, _) = recipe.articulation.filter.cutoffs(0.0, base_cutoff);
         let level = recipe.gain * event.intensity.get() * (0.93 + rng.f32() * 0.14);
         let steps = std::array::from_fn(|_| StepState::new(&mut rng));
-        let profiles = LayerProfiles::from(recipe.layers());
+        let mut layer_recipes = recipe.describe(event.kind, event.edits).layers;
+        for profile in &mut layer_recipes {
+            if event.edits.layer(profile.layer).state == SfxLayerState::Muted {
+                profile.level = 0.0;
+            }
+        }
+        let profiles = LayerProfiles::from(layer_recipes);
+        let body_band = event.edits.layer(SfxLayer::Body).filter;
+        let texture_band = event.edits.layer(SfxLayer::Texture).filter;
+        let (body_lowpass, body_highpass) = recipe.layer_cutoffs(body_band, 0.0, base_cutoff);
+        let (texture_lowpass, texture_highpass) =
+            recipe.layer_cutoffs(texture_band, 0.0, base_cutoff);
         let bright = BrightDetail::new(sample_rate, profiles.flecks, rng.u64(..));
         let crisp = CrispDetail::new(
             sample_rate,
             profiles.crisp,
-            recipe.patch.crisp(),
+            recipe.patch.crisp().scaled(recipe.pitch_scale),
             seed ^ 0x4352_4953_505f_4846,
         );
         let voice = Self {
             recipe,
-            pitch_hz,
+            nominal_pitch_hz: pitch_hz / recipe.pitch_scale.get(),
             duration,
             age: 0,
             end_frame,
@@ -1555,8 +1691,8 @@ impl Voice {
             started,
             steps,
             rng,
-            body_filter: BodyFilter::new(sample_rate, highpass, cutoff),
-            texture_filter: BodyFilter::new(sample_rate, highpass, cutoff),
+            body_filter: BodyFilter::new(sample_rate, body_highpass, body_lowpass),
+            texture_filter: BodyFilter::new(sample_rate, texture_highpass, texture_lowpass),
             tonal_filter: BandFilter::new(
                 sample_rate,
                 profiles.tonal.highpass_hz,
@@ -1572,6 +1708,8 @@ impl Voice {
             layers: event.layers,
             profiles,
             base_cutoff,
+            body_band,
+            texture_band,
             filter_interval: (sample_rate * 0.001).ceil().max(1.0) as u32,
         };
         let generated = GeneratedEvent {
@@ -1584,6 +1722,7 @@ impl Voice {
             cutoff_hz: cutoff.min(sample_rate * 0.45),
             gain: level,
             layers: event.layers,
+            edits: event.edits,
         };
         (voice, generated)
     }
@@ -1608,7 +1747,7 @@ impl Voice {
                     * step.level;
                 let source = state.source(
                     self.recipe,
-                    self.pitch_hz * step.pitch_ratio,
+                    self.nominal_pitch_hz * step.pitch_ratio,
                     local_time,
                     self.sample_rate,
                     &mut self.rng,
@@ -1619,7 +1758,8 @@ impl Voice {
                 parts.tonal += source.tonal * envelope;
                 shimmer += state.shimmer(
                     local_time,
-                    self.pitch_hz * step.pitch_ratio,
+                    self.nominal_pitch_hz * step.pitch_ratio,
+                    self.recipe.pitch_scale,
                     self.profiles.shimmer,
                     self.sample_rate,
                     table,
@@ -1633,12 +1773,13 @@ impl Voice {
         if self.age.is_multiple_of(self.filter_interval)
             && let Some(time) = filter_time
         {
-            let (lowpass, highpass) = self
-                .recipe
-                .articulation
-                .filter
-                .cutoffs(time, self.base_cutoff);
+            let (lowpass, highpass) =
+                self.recipe
+                    .layer_cutoffs(self.body_band, time, self.base_cutoff);
             self.body_filter.cutoff(self.sample_rate, highpass, lowpass);
+            let (lowpass, highpass) =
+                self.recipe
+                    .layer_cutoffs(self.texture_band, time, self.base_cutoff);
             self.texture_filter
                 .cutoff(self.sample_rate, highpass, lowpass);
         }
@@ -2159,8 +2300,8 @@ mod tests {
 
     #[test]
     fn digital_details_break_up_a_dominant_clean_carrier() {
-        let (mut voice, _) = Voice::new(SfxEvent::new(SfxKind::Focus), SAMPLE_RATE, 71, 0);
-        let pitch = voice.pitch_hz;
+        let (mut voice, generated) = Voice::new(SfxEvent::new(SfxKind::Focus), SAMPLE_RATE, 71, 0);
+        let pitch = generated.pitch_hz;
         let table = SineTable::new();
         let start = (0.02 * SAMPLE_RATE as f32) as usize;
         let end = ((voice.duration - 0.008) * SAMPLE_RATE as f32) as usize;
@@ -2244,6 +2385,7 @@ mod tests {
                 pan: Pan::new(pan).unwrap(),
                 intensity: Unit::ONE,
                 layers: SfxLayerSelection::All,
+                edits: SfxEdits::DEFAULT,
             })
             .unwrap();
             let near = usize::from(pan > 0.0);

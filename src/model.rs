@@ -583,7 +583,18 @@ impl Default for ReverbSettings {
 }
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Display, EnumString, EnumIter,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    EnumIter,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
@@ -635,6 +646,423 @@ pub struct SfxEvent {
     pub intensity: Unit,
     #[serde(default)]
     pub layers: SfxLayerSelection,
+    #[serde(default)]
+    pub edits: SfxEdits,
+}
+
+/// A bounded multiplier for an event's pitch or duration.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct SfxScale(f32);
+
+impl SfxScale {
+    pub const MIN: f32 = 0.25;
+    pub const MAX: f32 = 4.0;
+    pub const ONE: Self = Self(1.0);
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "SFX scale",
+                value: value as f64,
+                expected: "a finite multiplier in 0.25..=4",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for SfxScale {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
+impl TryFrom<f32> for SfxScale {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SfxScale> for f32 {
+    fn from(value: SfxScale) -> Self {
+        value.get()
+    }
+}
+
+/// An ordered filter band, validated before it reaches synthesis.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SfxFilterBandInput")]
+pub struct SfxFilterBand {
+    highpass_hz: f32,
+    lowpass_hz: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SfxFilterBandInput {
+    highpass_hz: f32,
+    lowpass_hz: f32,
+}
+
+impl SfxFilterBand {
+    pub const MIN_HZ: f32 = 10.0;
+    pub const MAX_HZ: f32 = 24_000.0;
+
+    pub fn new(highpass_hz: f32, lowpass_hz: f32) -> Result<Self> {
+        for (name, value) in [("SFX high-pass", highpass_hz), ("SFX low-pass", lowpass_hz)] {
+            if !value.is_finite() || !(Self::MIN_HZ..=Self::MAX_HZ).contains(&value) {
+                return Err(Error::InvalidParameter {
+                    name,
+                    value: value as f64,
+                    expected: "a finite frequency in 10..=24000 Hz",
+                });
+            }
+        }
+        if highpass_hz >= lowpass_hz {
+            return Err(Error::InvalidParameter {
+                name: "SFX high-pass",
+                value: highpass_hz as f64,
+                expected: "a frequency below the low-pass cutoff",
+            });
+        }
+        Ok(Self {
+            highpass_hz,
+            lowpass_hz,
+        })
+    }
+
+    #[must_use]
+    pub const fn highpass_hz(self) -> f32 {
+        self.highpass_hz
+    }
+
+    #[must_use]
+    pub const fn lowpass_hz(self) -> f32 {
+        self.lowpass_hz
+    }
+}
+
+impl TryFrom<SfxFilterBandInput> for SfxFilterBand {
+    type Error = Error;
+
+    fn try_from(value: SfxFilterBandInput) -> Result<Self> {
+        Self::new(value.highpass_hz, value.lowpass_hz)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SfxLayerState {
+    #[default]
+    Audible,
+    Muted,
+}
+
+/// Layer overrides keep muting independent of the stored level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SfxLayerEdits {
+    pub state: SfxLayerState,
+    pub level: Option<Unit>,
+    pub filter: Option<SfxFilterBand>,
+}
+
+impl SfxLayerEdits {
+    pub const DEFAULT: Self = Self {
+        state: SfxLayerState::Audible,
+        level: None,
+        filter: None,
+    };
+}
+
+/// Tonal sequence clock rate, independent of the texture's grain clock.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct SfxStepRate(f32);
+
+impl SfxStepRate {
+    pub const MIN_HZ: f32 = 20.0;
+    pub const MAX_HZ: f32 = 2_000.0;
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN_HZ..=Self::MAX_HZ).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "SFX tonal step rate",
+                value: value as f64,
+                expected: "a finite frequency in 20..=2000 Hz",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for SfxStepRate {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SfxStepRate> for f32 {
+    fn from(value: SfxStepRate) -> Self {
+        value.get()
+    }
+}
+
+/// Positive envelope timing in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct SfxMilliseconds(f32);
+
+impl SfxMilliseconds {
+    pub const MIN: f32 = 0.01;
+    pub const MAX: f32 = 20.0;
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "SFX envelope time",
+                value: value as f64,
+                expected: "a finite duration in 0.01..=20 milliseconds",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for SfxMilliseconds {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SfxMilliseconds> for f32 {
+    fn from(value: SfxMilliseconds) -> Self {
+        value.get()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SfxTonalStep {
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+}
+
+impl SfxTonalStep {
+    pub const ALL: [Self; 6] = [
+        Self::One,
+        Self::Two,
+        Self::Three,
+        Self::Four,
+        Self::Five,
+        Self::Six,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::One => "Step 1",
+            Self::Two => "Step 2",
+            Self::Three => "Step 3",
+            Self::Four => "Step 4",
+            Self::Five => "Step 5",
+            Self::Six => "Step 6",
+        }
+    }
+
+    pub(crate) fn at_clock(clock: f32) -> Self {
+        match clock as usize % 6 {
+            0 => Self::One,
+            1 => Self::Two,
+            2 => Self::Three,
+            3 => Self::Four,
+            4 => Self::Five,
+            5 => Self::Six,
+            _ => unreachable!("six-step clock stays within the sequence"),
+        }
+    }
+}
+
+/// Owned pitch ratios retain their slot names in serialized event edits.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SfxTonalSequence {
+    one: SfxScale,
+    two: SfxScale,
+    three: SfxScale,
+    four: SfxScale,
+    five: SfxScale,
+    six: SfxScale,
+}
+
+impl SfxTonalSequence {
+    #[must_use]
+    pub const fn new(ratios: [SfxScale; 6]) -> Self {
+        let [one, two, three, four, five, six] = ratios;
+        Self {
+            one,
+            two,
+            three,
+            four,
+            five,
+            six,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self, step: SfxTonalStep) -> SfxScale {
+        match step {
+            SfxTonalStep::One => self.one,
+            SfxTonalStep::Two => self.two,
+            SfxTonalStep::Three => self.three,
+            SfxTonalStep::Four => self.four,
+            SfxTonalStep::Five => self.five,
+            SfxTonalStep::Six => self.six,
+        }
+    }
+
+    pub fn set(&mut self, step: SfxTonalStep, ratio: SfxScale) {
+        *match step {
+            SfxTonalStep::One => &mut self.one,
+            SfxTonalStep::Two => &mut self.two,
+            SfxTonalStep::Three => &mut self.three,
+            SfxTonalStep::Four => &mut self.four,
+            SfxTonalStep::Five => &mut self.five,
+            SfxTonalStep::Six => &mut self.six,
+        } = ratio;
+    }
+}
+
+impl Default for SfxTonalSequence {
+    fn default() -> Self {
+        Self::new([SfxScale::ONE; 6])
+    }
+}
+
+/// Controls for the tonal FM generator and its six-step pitch sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SfxTonalEdits {
+    pub carrier: SfxScale,
+    pub fm_index: Unit,
+    pub fm_ratio: SfxScale,
+    pub step_rate: Option<SfxStepRate>,
+    pub attack: SfxMilliseconds,
+    pub release: SfxMilliseconds,
+    pub pitch_ratios: Option<SfxTonalSequence>,
+}
+
+impl SfxTonalEdits {
+    pub const DEFAULT: Self = Self {
+        carrier: SfxScale::ONE,
+        fm_index: Unit(0.08),
+        fm_ratio: SfxScale(1.5),
+        step_rate: None,
+        attack: SfxMilliseconds(0.12),
+        release: SfxMilliseconds(0.35),
+        pitch_ratios: None,
+    };
+}
+
+impl Default for SfxTonalEdits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Inline edits travel with an event through the existing audio command queue.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SfxEdits {
+    pub pitch: SfxScale,
+    pub duration: SfxScale,
+    pub tonal: SfxTonalEdits,
+    layers: SfxLayers,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SfxLayers {
+    body: SfxLayerEdits,
+    texture: SfxLayerEdits,
+    tonal: SfxLayerEdits,
+    flecks: SfxLayerEdits,
+    shimmer: SfxLayerEdits,
+    crisp: SfxLayerEdits,
+}
+
+impl SfxEdits {
+    pub const DEFAULT: Self = Self {
+        pitch: SfxScale::ONE,
+        duration: SfxScale::ONE,
+        tonal: SfxTonalEdits::DEFAULT,
+        layers: SfxLayers {
+            body: SfxLayerEdits::DEFAULT,
+            texture: SfxLayerEdits::DEFAULT,
+            tonal: SfxLayerEdits::DEFAULT,
+            flecks: SfxLayerEdits::DEFAULT,
+            shimmer: SfxLayerEdits::DEFAULT,
+            crisp: SfxLayerEdits::DEFAULT,
+        },
+    };
+
+    #[must_use]
+    pub const fn layer(self, layer: SfxLayer) -> SfxLayerEdits {
+        match layer {
+            SfxLayer::Body => self.layers.body,
+            SfxLayer::Texture => self.layers.texture,
+            SfxLayer::Tonal => self.layers.tonal,
+            SfxLayer::Flecks => self.layers.flecks,
+            SfxLayer::Shimmer => self.layers.shimmer,
+            SfxLayer::Crisp => self.layers.crisp,
+        }
+    }
+
+    pub fn set_layer(&mut self, layer: SfxLayer, edits: SfxLayerEdits) {
+        *match layer {
+            SfxLayer::Body => &mut self.layers.body,
+            SfxLayer::Texture => &mut self.layers.texture,
+            SfxLayer::Tonal => &mut self.layers.tonal,
+            SfxLayer::Flecks => &mut self.layers.flecks,
+            SfxLayer::Shimmer => &mut self.layers.shimmer,
+            SfxLayer::Crisp => &mut self.layers.crisp,
+        } = edits;
+    }
+}
+
+impl Default for SfxEdits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Components rendered for an event. Isolating a component preserves its
@@ -662,6 +1090,7 @@ impl SfxEvent {
             pan: Pan::CENTER,
             intensity: Unit(0.6),
             layers: SfxLayerSelection::All,
+            edits: SfxEdits::DEFAULT,
         }
     }
 }
@@ -678,6 +1107,8 @@ pub struct GeneratedEvent {
     pub cutoff_hz: f32,
     pub gain: f32,
     pub layers: SfxLayerSelection,
+    #[serde(default)]
+    pub edits: SfxEdits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

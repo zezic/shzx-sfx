@@ -5,8 +5,8 @@ These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- `cargo test --all-targets --release --locked --offline`: 90 tests passed.
-- `cargo test --no-default-features --release --locked --offline`: 63 tests passed.
+- `cargo test --all-targets --release --locked --offline`: 104 tests passed.
+- `cargo test --no-default-features --release --locked --offline`: 71 tests passed.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
 - The scoped allocator audit includes first rendering, all effect families,
@@ -214,3 +214,43 @@ auditions, and BG monitor preservation on other pages. It exited normally
 and restored terminal state. A 12-second SFX audition peaks at -5.66 dBFS,
 RMS -32.92 dBFS including gaps; a separate Crisp-only export is available for
 checking the high-frequency texture without the other components.
+
+## Event layer muting and parameter editing
+
+Each inspector row has independent mute and edit controls. The editor changes
+the selected layer's level and ordered HP/LP band, and the event's pitch and
+duration multipliers. Session edits follow the effect while browsing; reset
+can restore one event or all controls. Edits apply to subsequent triggers,
+including solos, without changing voices or tails already playing.
+
+Deterministic render tests verify that muting removes only the chosen path,
+unmuting restores the same samples, halving a layer's level quarters its
+energy, and edited filters reach every layer. Spectral comparisons verify
+that pitch edits shift Tonal, Shimmer, and Crisp beyond their nominal carrier
+registers. Numeric and serialization tests reject invalid scales and filter
+bands. The allocation audit includes edited events at 8 and 48 kHz and still
+observes zero allocations and deallocations during command application and
+rendering.
+
+A default Confirm export was bitwise identical to a separate build of the
+preceding code. Its 0.6-second file measured peak 0.258062 and RMS 0.022594.
+Existing release checks for transitions, spectral balance, and effect tails
+also pass. TestBackend checks cover focus, silent editing, effect retention,
+reset scope, and mouse targets; rendered 80x24 palette and editor snapshots
+were visually inspected. Layout checks also cover 100x32, 140x24, and 160x36.
+The native muted smoke test could not open CoreAudio on this host and exited
+with OSStatus 560947818 before entering the panel.
+
+The Tonal editor exposes carrier tuning, FM index and ratio, a separate step
+clock, slot attack/release, and all six pitch ratios. Its Mix, Synthesis, and
+Sequence pages fit at 80x24. Focus, keyboard page switching, preserved sequence
+values, tone-only auditions, and synthesis-only reset scope are covered by
+terminal tests; all three compact pages were also visually inspected.
+
+Waveform tests vary each synthesis control and pitch slot independently,
+checking that Tonal changes reproducibly while the other five solos remain
+bitwise identical. Extreme settings remain finite at 8, 48, and 192 kHz;
+edited triggers remain allocation-free. A 74.25-second palette export of all
+37 default events, seed 123 at 48 kHz with two-second spacing and reverb tails,
+was bitwise identical to a separate build of the preceding code. It measured
+peak 0.792593 and RMS 0.013188.

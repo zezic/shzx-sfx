@@ -374,7 +374,7 @@ struct ScheduledCommand {
 
 #[derive(Serialize)]
 #[serde(tag = "record", rename_all = "kebab-case")]
-enum TraceRecord {
+enum TraceRecord<'a> {
     Config {
         symbol: Symbol,
         seed: u64,
@@ -388,7 +388,7 @@ enum TraceRecord {
     Command {
         requested_at_seconds: f64,
         applied_at_seconds: f64,
-        command: Command,
+        command: &'a Command,
         snapshot: Snapshot,
     },
     Snapshot {
@@ -425,7 +425,7 @@ impl Meter {
         (self.square_sum / (self.frames as f64 * 2.0)).sqrt()
     }
 
-    fn summary(&self) -> TraceRecord {
+    fn summary(&self) -> TraceRecord<'_> {
         TraceRecord::Summary {
             frames: self.frames,
             peak: self.peak,
@@ -534,6 +534,7 @@ fn demo(seconds: f64) -> Vec<TimedCommand> {
     let trigger = |kind, pan| {
         Command::Trigger(SfxEvent {
             layers: shzx_sfx::SfxLayerSelection::All,
+            edits: shzx_sfx::SfxEdits::DEFAULT,
             kind,
             pan: Pan::new(pan).expect("valid demo pan"),
             intensity: unit(0.65),
@@ -590,7 +591,7 @@ impl Session {
     fn fill(
         &mut self,
         output: &mut [[f32; 2]],
-        observer: &mut impl FnMut(TraceRecord) -> CliResult<()>,
+        observer: &mut impl FnMut(TraceRecord<'_>) -> CliResult<()>,
     ) -> CliResult<()> {
         self.fill_inner::<true>(output, observer)
     }
@@ -602,7 +603,7 @@ impl Session {
     fn fill_inner<const TRACE: bool>(
         &mut self,
         mut output: &mut [[f32; 2]],
-        observer: &mut impl FnMut(TraceRecord) -> CliResult<()>,
+        observer: &mut impl FnMut(TraceRecord<'_>) -> CliResult<()>,
     ) -> CliResult<()> {
         while !output.is_empty() {
             while let Some(scheduled) = self
@@ -615,7 +616,7 @@ impl Session {
                     observer(TraceRecord::Command {
                         requested_at_seconds: scheduled.entry.at_seconds,
                         applied_at_seconds: self.frame as f64 / f64::from(self.sample_rate),
-                        command: scheduled.entry.command,
+                        command: &scheduled.entry.command,
                         snapshot: self.renderer.snapshot(),
                     })?;
                 }
@@ -644,7 +645,7 @@ impl Session {
     }
 }
 
-fn trace_line(writer: &mut impl Write, record: TraceRecord) -> CliResult<()> {
+fn trace_line(writer: &mut impl Write, record: TraceRecord<'_>) -> CliResult<()> {
     serde_json::to_writer(&mut *writer, &record)?;
     writer.write_all(b"\n")?;
     Ok(())
@@ -773,6 +774,7 @@ fn palette(args: PaletteArgs) -> CliResult<()> {
                 at_seconds,
                 command: Command::Trigger(SfxEvent {
                     layers: shzx_sfx::SfxLayerSelection::All,
+                    edits: shzx_sfx::SfxEdits::DEFAULT,
                     kind,
                     pan: Pan::new(pan)?,
                     intensity: unit(0.65),
@@ -889,6 +891,7 @@ fn benchmark_timeline(
             at_seconds,
             command: Command::Trigger(SfxEvent {
                 layers: shzx_sfx::SfxLayerSelection::All,
+                edits: shzx_sfx::SfxEdits::DEFAULT,
                 kind: kinds[index % kinds.len()],
                 pan: Pan::new((index as f32 * 0.37).sin() * 0.8)?,
                 intensity: unit(0.6),
@@ -1181,12 +1184,19 @@ fn play_timeline(
 
 #[cfg(feature = "playback")]
 enum ReplAction {
-    Send(Command),
+    Send(Box<Command>),
     Status,
     Wait(std::time::Duration),
     Help,
     Inspect(SfxKind),
     Quit,
+}
+
+#[cfg(feature = "playback")]
+impl ReplAction {
+    fn send(command: Command) -> Self {
+        Self::Send(Box::new(command))
+    }
 }
 
 #[cfg(feature = "playback")]
@@ -1197,13 +1207,14 @@ fn repl_command(line: &str, mix: Mix, reverb: ReverbSettings) -> CliResult<ReplA
         return Ok(Help);
     };
     match (verb, words.len()) {
-        ("trigger", 2..=5) => Ok(Send(Command::Trigger(SfxEvent {
+        ("trigger", 2..=5) => Ok(ReplAction::send(Command::Trigger(SfxEvent {
             layers: parse_layers(words.get(4).copied().unwrap_or("all"))?,
+            edits: shzx_sfx::SfxEdits::DEFAULT,
             kind: words[1].parse()?,
             pan: Pan::new(words.get(2).map_or(Ok(0.0), |value| value.parse::<f32>())?)?,
             intensity: Unit::new(words.get(3).map_or(Ok(0.6), |value| value.parse::<f32>())?)?,
         }))),
-        ("market", 7) => Ok(Send(Command::Market(MarketContext {
+        ("market", 7) => Ok(ReplAction::send(Command::Market(MarketContext {
             trend: words[1].parse()?,
             trend_strength: Unit::new(words[2].parse()?)?,
             volume: Unit::new(words[3].parse()?)?,
@@ -1211,19 +1222,19 @@ fn repl_command(line: &str, mix: Mix, reverb: ReverbSettings) -> CliResult<ReplA
             zoom: Unit::new(words[5].parse()?)?,
             activity: Unit::new(words[6].parse()?)?,
         }))),
-        ("mode", 2) => Ok(Send(Command::Mode(words[1].parse()?))),
-        ("spatial", 2) => Ok(Send(Command::Spatial(words[1].parse()?))),
-        ("symbol", 2) => Ok(Send(Command::Symbol(Symbol::new(words[1])?))),
+        ("mode", 2) => Ok(ReplAction::send(Command::Mode(words[1].parse()?))),
+        ("spatial", 2) => Ok(ReplAction::send(Command::Spatial(words[1].parse()?))),
+        ("symbol", 2) => Ok(ReplAction::send(Command::Symbol(Symbol::new(words[1])?))),
         ("mix", 3) => {
             let layer = MixLayer::from_str(words[1], true).map_err(invalid)?;
             let mut next = mix;
             layer.set(&mut next, Unit::new(words[2].parse()?)?);
-            Ok(Send(Command::Mix(next)))
+            Ok(ReplAction::send(Command::Mix(next)))
         }
         ("gain", 2) => {
             let mut next = mix;
             next.output_gain = OutputGain::new(words[1].parse()?)?;
-            Ok(Send(Command::Mix(next)))
+            Ok(ReplAction::send(Command::Mix(next)))
         }
         ("reverb", 4) => {
             let bus = ReverbBus::from_str(words[1], true).map_err(invalid)?;
@@ -1232,7 +1243,7 @@ fn repl_command(line: &str, mix: Mix, reverb: ReverbSettings) -> CliResult<ReplA
             let mut parameters = bus.get(settings);
             field.set(&mut parameters, Unit::new(words[3].parse()?)?);
             bus.set(&mut settings, parameters);
-            Ok(Send(Command::Reverb(settings)))
+            Ok(ReplAction::send(Command::Reverb(settings)))
         }
         ("status", 1) => Ok(Status),
         ("inspect", 2) => Ok(Inspect(words[1].parse()?)),
@@ -1271,12 +1282,12 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
             continue;
         }
         match repl_command(&line, mix, reverb) {
-            Ok(ReplAction::Send(command)) => match handle.send(command) {
+            Ok(ReplAction::Send(command)) => match handle.send(*command) {
                 Ok(()) => {
-                    if let Command::Mix(next) = command {
+                    if let Command::Mix(next) = *command {
                         mix = next;
                     }
-                    if let Command::Reverb(next) = command {
+                    if let Command::Reverb(next) = *command {
                         reverb = next;
                     }
                     println!("Queued {}", serde_json::to_string(&command)?);

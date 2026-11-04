@@ -81,12 +81,14 @@ fn effect_selection_is_silent_and_firing_uses_the_selected_pan_and_intensity() {
         commands,
         [
             Command::Trigger(SfxEvent {
+                edits: SfxEdits::default(),
                 layers: shzx_sfx::SfxLayerSelection::All,
                 kind: SfxKind::OrderFill,
                 pan: app.event_pan,
                 intensity: app.event_intensity,
             }),
             Command::Trigger(SfxEvent {
+                edits: SfxEdits::default(),
                 layers: shzx_sfx::SfxLayerSelection::All,
                 kind: SfxKind::Click,
                 pan: app.event_pan,
@@ -380,6 +382,7 @@ fn clicking_an_effect_auditions_each_click_with_the_selected_parameters() {
         );
     }
     let event = SfxEvent {
+        edits: SfxEdits::default(),
         layers: shzx_sfx::SfxLayerSelection::All,
         kind: SfxKind::OrderFill,
         pan: app.event_pan,
@@ -444,4 +447,251 @@ fn inspector_navigation_is_silent_and_solo_buttons_keep_original_event_parameter
         panic!("play all should enqueue an event")
     };
     assert_eq!(event.layers, SfxLayerSelection::All);
+}
+
+#[test]
+fn inspector_edits_and_mutes_follow_each_effect_through_mix_and_solo_auditions() {
+    let mut app = app();
+    app.select_tab(Tab::Sfx);
+    let mut commands = Vec::new();
+    let mut send = |command| {
+        commands.push(command);
+        Ok(())
+    };
+    app.activate(Control::EditLayer(SfxLayer::Texture), &mut send);
+    app.adjust(Control::SfxParameter(SfxParameter::Level), 0.1, &mut send);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Highpass),
+        100.0,
+        &mut send,
+    );
+    app.adjust(Control::SfxParameter(SfxParameter::Pitch), 0.5, &mut send);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Duration),
+        0.25,
+        &mut send,
+    );
+    let original_edits = app.current_edits();
+    let level = app
+        .numeric(Control::SfxParameter(SfxParameter::Level))
+        .unwrap()
+        .0;
+    app.activate(Control::MuteLayer(SfxLayer::Texture), &mut send);
+    assert_eq!(
+        app.current_edits().layer(SfxLayer::Texture).state,
+        SfxLayerState::Muted
+    );
+    assert_eq!(
+        app.numeric(Control::SfxParameter(SfxParameter::Level))
+            .unwrap()
+            .0,
+        level
+    );
+    let muted_edits = app.current_edits();
+    assert!(!app.key(key(KeyCode::Esc, KeyEventKind::Press), &mut send));
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.focus, Control::EditLayer(SfxLayer::Texture));
+    app.select_effect(1);
+    assert_eq!(app.current_edits(), SfxEdits::default());
+    app.select_effect(-1);
+    assert_eq!(app.current_edits(), muted_edits);
+    assert!(commands.is_empty());
+
+    app.activate(Control::AuditionAll, &mut |command| {
+        commands.push(command);
+        Ok(())
+    });
+    app.activate(Control::AuditionLayer(SfxLayer::Tonal), &mut |command| {
+        commands.push(command);
+        Ok(())
+    });
+    for (command, selection) in commands.into_iter().zip([
+        SfxLayerSelection::All,
+        SfxLayerSelection::Only(SfxLayer::Tonal),
+    ]) {
+        let Command::Trigger(event) = command else {
+            panic!("audition must trigger an event")
+        };
+        assert_eq!(event.edits, muted_edits);
+        assert_eq!(event.layers, selection);
+    }
+    app.activate(Control::MuteLayer(SfxLayer::Texture), &mut |_| Ok(()));
+    assert_eq!(app.current_edits(), original_edits);
+}
+
+#[test]
+fn editor_traps_focus_bounds_filter_bands_and_resets_only_the_current_effect() {
+    let mut app = app();
+    let mut send =
+        |_| -> shzx_sfx::Result<()> { panic!("editing and navigation must stay silent") };
+    app.select_tab(Tab::Inspect);
+    app.activate(Control::EditLayer(SfxLayer::Shimmer), &mut send);
+    app.key(key(KeyCode::BackTab, KeyEventKind::Press), &mut send);
+    assert_eq!(app.focus, Control::CloseSfxEditor);
+    app.key(key(KeyCode::Tab, KeyEventKind::Press), &mut send);
+    assert_eq!(app.focus, Control::SfxParameter(SfxParameter::Level));
+    app.key(key(KeyCode::Char('1'), KeyEventKind::Press), &mut send);
+    assert_eq!(app.tab, Tab::Inspect);
+    app.focus = Control::SfxParameter(SfxParameter::Highpass);
+    app.key(key(KeyCode::End, KeyEventKind::Press), &mut send);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Lowpass),
+        -100_000.0,
+        &mut send,
+    );
+    let band = app.current_edits().layer(SfxLayer::Shimmer).filter.unwrap();
+    assert!(band.highpass_hz() < band.lowpass_hz());
+    app.adjust(Control::SfxParameter(SfxParameter::Pitch), -10.0, &mut send);
+    assert_eq!(app.current_edits().pitch.get(), SfxScale::MIN);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Duration),
+        10.0,
+        &mut send,
+    );
+    assert_eq!(app.current_edits().duration.get(), SfxScale::MAX);
+    app.key(key(KeyCode::Esc, KeyEventKind::Press), &mut send);
+    let first_effect = app.effect;
+    let first_edits = app.current_edits();
+    app.select_effect(1);
+    app.activate(Control::MuteLayer(SfxLayer::Body), &mut send);
+    app.activate(Control::ResetEffect, &mut send);
+    assert_eq!(app.current_edits(), SfxEdits::default());
+    assert_eq!(app.effect_edits[&first_effect], first_edits);
+}
+
+#[test]
+fn every_recipe_can_be_edited_to_slider_limits_without_inverting_filter_bands() {
+    let mut app = app();
+    for effect in SfxKind::iter() {
+        app.effect = effect;
+        for layer in SfxLayer::ALL {
+            app.inspector_layer = layer;
+            let parameters = EditorPage::ALL
+                .into_iter()
+                .filter(|&page| page == EditorPage::Mix || layer == SfxLayer::Tonal)
+                .flat_map(EditorPage::parameters);
+            for parameter in parameters {
+                let control = Control::SfxParameter(parameter);
+                for delta in [100_000.0, -100_000.0] {
+                    app.adjust(control, delta, &mut |_| panic!("edits must stay local"));
+                    let (value, low, high) = app.numeric(control).unwrap();
+                    assert!((low..=high).contains(&value));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tonal_editor_keeps_the_event_sequence_and_auditions_its_construction_settings() {
+    let mut app = app();
+    app.select_tab(Tab::Sfx);
+    let mut commands = Vec::new();
+    let mut send = |command| {
+        commands.push(command);
+        Ok(())
+    };
+    app.activate(Control::EditLayer(SfxLayer::Tonal), &mut send);
+    assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Tone));
+    assert_eq!(
+        app.focus,
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::Carrier))
+    );
+    assert!(app.current_edits().tonal.step_rate.is_none());
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::FmIndex)),
+        0.2,
+        &mut send,
+    );
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::StepRate)),
+        50.0,
+        &mut send,
+    );
+    let original_ratios = app.edited_recipe().tonal_pitch_ratios;
+    app.key(key(KeyCode::PageDown, KeyEventKind::Press), &mut send);
+    assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Sequence));
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::StepPitch(
+            SfxTonalStep::Three,
+        ))),
+        0.25,
+        &mut send,
+    );
+    let edited_ratios = app.edited_recipe().tonal_pitch_ratios;
+    for (step, (original, edited)) in SfxTonalStep::ALL
+        .into_iter()
+        .zip(original_ratios.into_iter().zip(edited_ratios))
+    {
+        assert_eq!(
+            edited,
+            if step == SfxTonalStep::Three {
+                original + 0.25
+            } else {
+                original
+            }
+        );
+    }
+    let edits = app.current_edits();
+    app.key(key(KeyCode::Esc, KeyEventKind::Press), &mut send);
+    app.select_effect(1);
+    assert_eq!(app.current_edits().tonal, SfxTonalEdits::DEFAULT);
+    app.select_effect(-1);
+    app.activate(Control::EditLayer(SfxLayer::Tonal), &mut send);
+    assert_eq!(app.current_edits(), edits);
+    assert!(commands.is_empty());
+    app.key(
+        key(KeyCode::Char(' '), KeyEventKind::Press),
+        &mut |command| {
+            commands.push(command);
+            Ok(())
+        },
+    );
+    app.activate(Control::AuditionAll, &mut |command| {
+        commands.push(command);
+        Ok(())
+    });
+    for (command, layers) in commands.into_iter().zip([
+        SfxLayerSelection::Only(SfxLayer::Tonal),
+        SfxLayerSelection::All,
+    ]) {
+        let Command::Trigger(event) = command else {
+            panic!("audition must trigger a sound")
+        };
+        assert_eq!(event.edits, edits);
+        assert_eq!(event.layers, layers);
+    }
+}
+
+#[test]
+fn resetting_tonal_construction_keeps_layer_mix_and_other_event_settings() {
+    let mut app = app();
+    let mut send = |_| -> shzx_sfx::Result<()> { panic!("editing must stay silent") };
+    app.select_tab(Tab::Inspect);
+    app.activate(Control::EditLayer(SfxLayer::Tonal), &mut send);
+    app.adjust(Control::SfxParameter(SfxParameter::Level), 0.1, &mut send);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Highpass),
+        100.0,
+        &mut send,
+    );
+    app.adjust(Control::SfxParameter(SfxParameter::Pitch), 0.5, &mut send);
+    app.adjust(
+        Control::SfxParameter(SfxParameter::Tonal(TonalParameter::FmIndex)),
+        0.2,
+        &mut send,
+    );
+    app.activate(Control::MuteLayer(SfxLayer::Tonal), &mut send);
+    let before = app.current_edits();
+    app.key(key(KeyCode::Char('r'), KeyEventKind::Press), &mut send);
+    assert_eq!(app.current_edits().tonal, SfxTonalEdits::DEFAULT);
+    assert_eq!(
+        app.current_edits().layer(SfxLayer::Tonal),
+        before.layer(SfxLayer::Tonal)
+    );
+    assert_eq!(app.current_edits().pitch, before.pitch);
+    app.key(key(KeyCode::PageUp, KeyEventKind::Press), &mut send);
+    assert_eq!(app.overlay, Overlay::SfxEditor(EditorPage::Mix));
+    app.key(key(KeyCode::Char('r'), KeyEventKind::Press), &mut send);
+    assert_eq!(app.current_edits(), SfxEdits::DEFAULT);
 }

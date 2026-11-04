@@ -1,7 +1,9 @@
 use fundsp::{fft::real_fft, hacker32::Complex32};
 use shzx_sfx::{
-    Command, Mix, OutputGain, RenderConfig, Renderer, SfxEvent, SfxGenerator, SfxKind, SfxLayer,
-    SfxLayerSelection, SpatialMode, Unit,
+    Command, GeneratedEvent, Mix, OutputGain, RenderConfig, Renderer, SfxEdits, SfxEvent,
+    SfxFilterBand, SfxGenerator, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerSelection,
+    SfxLayerState, SfxMilliseconds, SfxModulation, SfxScale, SfxStepRate, SfxTonalEdits,
+    SfxTonalSequence, SfxTonalStep, SpatialMode, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -27,20 +29,29 @@ fn dry_renderer(sample_rate: u32) -> Renderer {
 }
 
 fn event_audio(kind: SfxKind, layers: SfxLayerSelection, sample_rate: u32) -> Vec<[f32; 2]> {
+    render_event(
+        SfxEvent {
+            layers,
+            ..SfxEvent::new(kind)
+        },
+        sample_rate,
+    )
+    .1
+}
+
+fn render_event(event: SfxEvent, sample_rate: u32) -> (GeneratedEvent, Vec<[f32; 2]>) {
     let mut renderer = dry_renderer(sample_rate);
     let mut warmup = vec![[0.0; 2]; sample_rate as usize / 4];
     renderer.render(&mut warmup);
-    renderer.apply(Command::Trigger(SfxEvent {
-        layers,
-        ..SfxEvent::new(kind)
-    }));
+    renderer.apply(Command::Trigger(event));
     let generated = renderer.snapshot().last_event.unwrap();
-    assert_eq!(generated.kind, kind);
-    assert_eq!(generated.layers, layers);
+    assert_eq!(generated.kind, event.kind);
+    assert_eq!(generated.layers, event.layers);
+    assert_eq!(generated.edits, event.edits);
     let mut frames =
         vec![[0.0; 2]; (generated.duration_seconds * sample_rate as f32).ceil() as usize];
     renderer.render(&mut frames);
-    frames
+    (generated, frames)
 }
 
 fn energy(frames: &[[f32; 2]]) -> f64 {
@@ -117,6 +128,7 @@ fn event_selection_round_trips_and_omitted_selection_means_all_layers() {
     let ordinary: SfxEvent =
         serde_json::from_str(r#"{"kind":"click","pan":0,"intensity":0.6}"#).unwrap();
     assert_eq!(ordinary.layers, SfxLayerSelection::All);
+    assert_eq!(ordinary.edits, SfxEdits::DEFAULT);
     let solo = SfxEvent {
         layers: SfxLayerSelection::Only(SfxLayer::Texture),
         ..ordinary
@@ -129,6 +141,415 @@ fn event_selection_round_trips_and_omitted_selection_means_all_layers() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn edited_events_round_trip_and_reject_invalid_numeric_input() {
+    let mut event = SfxEvent::new(SfxKind::Confirm);
+    event.edits.pitch = SfxScale::new(1.5).unwrap();
+    event.edits.duration = SfxScale::new(2.0).unwrap();
+    event.edits.set_layer(
+        SfxLayer::Texture,
+        SfxLayerEdits {
+            state: SfxLayerState::Muted,
+            level: Some(Unit::new(0.12).unwrap()),
+            filter: Some(SfxFilterBand::new(800.0, 2_000.0).unwrap()),
+        },
+    );
+    let encoded = serde_json::to_value(event).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SfxEvent>(encoded.clone()).unwrap(),
+        event
+    );
+    for scale in [f32::NAN, f32::INFINITY, -1.0, 0.0, 4.01] {
+        assert!(SfxScale::new(scale).is_err());
+    }
+    for (highpass, lowpass) in [(0.0, 1_000.0), (2_000.0, 1_000.0), (100.0, f32::NAN)] {
+        assert!(SfxFilterBand::new(highpass, lowpass).is_err());
+    }
+    for invalid in [0.0, 4.01] {
+        let mut input = encoded.clone();
+        input["edits"]["pitch"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<SfxEvent>(input).is_err());
+    }
+    let mut input = encoded;
+    input["edits"]["layers"]["texture"]["filter"]["highpass_hz"] = serde_json::json!(3_000.0);
+    assert!(serde_json::from_value::<SfxEvent>(input).is_err());
+    let partial: SfxEvent = serde_json::from_str(
+        r#"{"kind":"click","pan":0,"intensity":0.6,"edits":{"layers":{"texture":{"state":"muted"}}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        partial.edits.layer(SfxLayer::Texture).state,
+        SfxLayerState::Muted
+    );
+    assert_eq!(
+        partial.edits.layer(SfxLayer::Body),
+        SfxLayerEdits::default()
+    );
+}
+
+#[test]
+fn layer_mutes_preserve_settings_and_remove_only_the_chosen_path() {
+    let event = SfxEvent::new(SfxKind::OrderFill);
+    let (_, full) = render_event(event, 48_000);
+    for layer in SfxLayer::ALL {
+        let mut muted = event;
+        muted.edits.set_layer(
+            layer,
+            SfxLayerEdits {
+                state: SfxLayerState::Muted,
+                ..SfxLayerEdits::default()
+            },
+        );
+        let (_, remaining) = render_event(muted, 48_000);
+        let solo = event_audio(event.kind, SfxLayerSelection::Only(layer), 48_000);
+        let residual: f64 = full
+            .iter()
+            .zip(&remaining)
+            .zip(&solo)
+            .flat_map(|((full, remaining), solo)| {
+                [
+                    full[0] - remaining[0] - solo[0],
+                    full[1] - remaining[1] - solo[1],
+                ]
+            })
+            .map(|sample| f64::from(sample).powi(2))
+            .sum();
+        assert!((residual / energy(&full)).sqrt() < 0.002, "{layer}");
+        muted.layers = SfxLayerSelection::Only(layer);
+        assert_eq!(energy(&render_event(muted, 48_000).1), 0.0);
+        muted.edits.set_layer(layer, SfxLayerEdits::default());
+        assert_eq!(render_event(muted, 48_000).1, solo);
+    }
+}
+
+#[test]
+fn every_layer_uses_edited_levels_and_filter_bands() {
+    for sample_rate in [8_000, 48_000] {
+        for layer in SfxLayer::ALL {
+            let event = SfxEvent {
+                layers: SfxLayerSelection::Only(layer),
+                ..SfxEvent::new(SfxKind::OrderFill)
+            };
+            let profile = event
+                .recipe()
+                .layers
+                .into_iter()
+                .find(|p| p.layer == layer)
+                .unwrap();
+            let (_, original) = render_event(event, sample_rate);
+            let mut edited = event;
+            edited.edits.set_layer(
+                layer,
+                SfxLayerEdits {
+                    level: Some(Unit::new(profile.level * 0.5).unwrap()),
+                    ..SfxLayerEdits::default()
+                },
+            );
+            let (_, quieter) = render_event(edited, sample_rate);
+            if energy(&original) == 0.0 {
+                assert_eq!(energy(&quieter), 0.0);
+                continue;
+            }
+            assert!(
+                (energy(&quieter) / energy(&original) - 0.25).abs() < 0.001,
+                "{layer}"
+            );
+            let band = SfxFilterBand::new(200.0, 1_000.0).unwrap();
+            edited.edits.set_layer(
+                layer,
+                SfxLayerEdits {
+                    filter: Some(band),
+                    ..SfxLayerEdits::default()
+                },
+            );
+            let adjusted = edited
+                .recipe()
+                .layers
+                .into_iter()
+                .find(|p| p.layer == layer)
+                .unwrap();
+            assert_eq!(adjusted.highpass_hz, band.highpass_hz());
+            assert_eq!(adjusted.lowpass_hz, band.lowpass_hz());
+            let (_, filtered) = render_event(edited, sample_rate);
+            assert!(filtered.iter().flatten().all(|sample| sample.is_finite()));
+            assert_ne!(
+                filtered, original,
+                "{layer}: editing the band must reach the renderer"
+            );
+            if layer == SfxLayer::Tonal && sample_rate == 48_000 {
+                assert!(
+                    energy(&filtered) < energy(&original) * 0.5,
+                    "a low-pass below the tonal carriers should attenuate their energy"
+                );
+            }
+            assert_eq!(render_event(edited, sample_rate).1, filtered);
+        }
+    }
+}
+
+#[test]
+fn pitch_edits_shift_tonal_shimmer_and_crisp_out_of_their_nominal_registers() {
+    for (layer, split_hz) in [
+        (SfxLayer::Tonal, 3_000.0),
+        (SfxLayer::Shimmer, 10_000.0),
+        (SfxLayer::Crisp, 11_000.0),
+    ] {
+        let event = SfxEvent {
+            layers: SfxLayerSelection::Only(layer),
+            ..SfxEvent::new(SfxKind::Click)
+        };
+        let mut shifted = event;
+        shifted.edits.pitch = SfxScale::new(1.5).unwrap();
+        let original_profile = event
+            .recipe()
+            .layers
+            .into_iter()
+            .find(|p| p.layer == layer)
+            .unwrap();
+        let shifted_profile = shifted
+            .recipe()
+            .layers
+            .into_iter()
+            .find(|p| p.layer == layer)
+            .unwrap();
+        assert_eq!(
+            shifted_profile.carrier_hz.unwrap(),
+            original_profile.carrier_hz.unwrap() * 1.5
+        );
+        let original = render_event(event, 48_000).1;
+        let shifted = render_event(shifted, 48_000).1;
+        let original_high = spectral_share_above(&original, 48_000, split_hz);
+        let shifted_high = spectral_share_above(&shifted, 48_000, split_hz);
+        assert!(
+            shifted_high > original_high + 0.05,
+            "{layer}: pitch should move spectral energy upward ({original_high} -> {shifted_high})"
+        );
+    }
+}
+
+#[test]
+fn event_pitch_and_duration_edits_reach_the_recipe_and_seeded_voice() {
+    let event = SfxEvent::new(SfxKind::Confirm);
+    let mut edited = event;
+    edited.edits.pitch = SfxScale::new(1.5).unwrap();
+    edited.edits.duration = SfxScale::new(2.0).unwrap();
+    let recipe = edited.recipe();
+    assert_eq!(recipe.pitch_hz, event.recipe().pitch_hz * 1.5);
+    assert_eq!(
+        recipe.duration_seconds,
+        event.recipe().duration_seconds * 2.0
+    );
+    let (original, _) = render_event(event, 48_000);
+    let (generated, frames) = render_event(edited, 48_000);
+    assert!((generated.pitch_hz / original.pitch_hz - 1.5).abs() < 0.0001);
+    assert!(generated.duration_seconds > original.duration_seconds * 1.9);
+    assert_eq!(render_event(edited, 48_000).1, frames);
+    let mut peak = 0.0_f32;
+    let mut rms = 0.0_f64;
+    for sample in frames.iter().flatten() {
+        peak = peak.max(sample.abs());
+        rms += f64::from(*sample).powi(2);
+    }
+    rms = (rms / (frames.len() * 2) as f64).sqrt();
+    assert!(peak.is_finite() && peak > 0.0 && peak < 1.0);
+    assert!(rms.is_finite() && rms > 0.0);
+}
+
+#[test]
+fn tonal_generator_edits_change_each_control_without_changing_other_layers() {
+    let event = SfxEvent::new(SfxKind::Confirm);
+    let original = event_audio(event.kind, SfxLayerSelection::Only(SfxLayer::Tonal), 48_000);
+    let other_layers: Vec<_> = SfxLayer::ALL
+        .into_iter()
+        .filter(|&layer| layer != SfxLayer::Tonal)
+        .map(|layer| {
+            (
+                layer,
+                event_audio(event.kind, SfxLayerSelection::Only(layer), 48_000),
+            )
+        })
+        .collect();
+    let mut variants: Vec<_> = [
+        (
+            "carrier",
+            SfxTonalEdits {
+                carrier: SfxScale::new(1.5).unwrap(),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+        (
+            "FM depth",
+            SfxTonalEdits {
+                fm_index: Unit::new(0.6).unwrap(),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+        (
+            "FM ratio",
+            SfxTonalEdits {
+                fm_ratio: SfxScale::new(3.0).unwrap(),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+        (
+            "step rate",
+            SfxTonalEdits {
+                step_rate: Some(SfxStepRate::new(80.0).unwrap()),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+        (
+            "attack",
+            SfxTonalEdits {
+                attack: SfxMilliseconds::new(2.0).unwrap(),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+        (
+            "release",
+            SfxTonalEdits {
+                release: SfxMilliseconds::new(2.0).unwrap(),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(name, edits)| (name.to_owned(), edits))
+    .collect();
+    let ratios = SfxTonalSequence::new(
+        event
+            .recipe()
+            .tonal_pitch_ratios
+            .map(|ratio| SfxScale::new(ratio).unwrap()),
+    );
+    for step in SfxTonalStep::ALL {
+        let mut sequence = ratios;
+        sequence.set(step, SfxScale::new(1.125).unwrap());
+        variants.push((
+            step.label().to_owned(),
+            SfxTonalEdits {
+                pitch_ratios: Some(sequence),
+                ..SfxTonalEdits::DEFAULT
+            },
+        ));
+    }
+    for (name, tonal) in variants {
+        let mut edited = event;
+        edited.edits.tonal = tonal;
+        edited.layers = SfxLayerSelection::Only(SfxLayer::Tonal);
+        let frames = render_event(edited, 48_000).1;
+        assert_ne!(
+            frames, original,
+            "{name}: the control must reach the generator"
+        );
+        assert_eq!(render_event(edited, 48_000).1, frames, "{name}");
+        for (layer, original) in &other_layers {
+            edited.layers = SfxLayerSelection::Only(*layer);
+            assert_eq!(
+                &render_event(edited, 48_000).1,
+                original,
+                "{name}: {layer} changed"
+            );
+        }
+    }
+}
+
+#[test]
+fn tonal_recipe_and_serialization_share_the_effective_generator_controls() {
+    let mut event = SfxEvent::new(SfxKind::Confirm);
+    event.edits.tonal = SfxTonalEdits {
+        carrier: SfxScale::new(1.5).unwrap(),
+        fm_index: Unit::new(0.7).unwrap(),
+        fm_ratio: SfxScale::new(3.0).unwrap(),
+        step_rate: Some(SfxStepRate::new(80.0).unwrap()),
+        attack: SfxMilliseconds::new(2.0).unwrap(),
+        release: SfxMilliseconds::new(3.0).unwrap(),
+        pitch_ratios: Some(SfxTonalSequence::new([SfxScale::new(1.25).unwrap(); 6])),
+    };
+    let recipe = event.recipe();
+    let profile = recipe
+        .layers
+        .into_iter()
+        .find(|profile| profile.layer == SfxLayer::Tonal)
+        .unwrap();
+    assert_eq!(
+        profile.carrier_hz.unwrap(),
+        SfxKind::Confirm.recipe().tonal_base_hz * 1.5
+    );
+    assert!(
+        matches!(profile.modulation, Some(SfxModulation::Fm {index,ratio}) if index == 0.7 && ratio == 3.0)
+    );
+    assert_eq!(profile.attack_ms, 2.0);
+    assert_eq!(profile.release_ms, 3.0);
+    assert_eq!(profile.duration_ms, 12.5);
+    assert_eq!(recipe.tonal_rate_hz, [80.0; 2]);
+    assert_eq!(
+        recipe.detail_rate_hz,
+        SfxKind::Confirm.recipe().detail_rate_hz
+    );
+    for step in SfxTonalStep::ALL {
+        assert_eq!(recipe.tonal_pitch_ratio(step), 1.25);
+    }
+    let encoded = serde_json::to_value(event).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SfxEvent>(encoded.clone()).unwrap(),
+        event
+    );
+    assert_eq!(encoded["edits"]["tonal"]["pitch_ratios"]["one"], 1.25);
+    for (field, invalid) in [
+        ("fm_index", 1.01),
+        ("fm_ratio", 0.0),
+        ("step_rate", 2001.0),
+        ("attack", 0.0),
+        ("release", -1.0),
+    ] {
+        let mut input = encoded.clone();
+        input["edits"]["tonal"][field] = serde_json::json!(invalid);
+        assert!(
+            serde_json::from_value::<SfxEvent>(input).is_err(),
+            "{field}"
+        );
+    }
+    let mut invalid = encoded;
+    invalid["edits"]["tonal"]["pitch_ratios"]["six"] = serde_json::json!(0.0);
+    assert!(serde_json::from_value::<SfxEvent>(invalid).is_err());
+    for invalid in [f32::NAN, f32::INFINITY, 0.0, 2001.0] {
+        assert!(SfxStepRate::new(invalid).is_err());
+        assert!(SfxMilliseconds::new(invalid).is_err());
+    }
+}
+
+#[test]
+fn extreme_tonal_edits_stay_finite_across_supported_sample_rates() {
+    for sample_rate in [8_000, 48_000, 192_000] {
+        for (scale, rate, milliseconds) in [
+            (4.0, SfxStepRate::MAX_HZ, SfxMilliseconds::MIN),
+            (0.25, SfxStepRate::MIN_HZ, SfxMilliseconds::MAX),
+        ] {
+            let mut event = SfxEvent::new(SfxKind::Confirm);
+            event.layers = SfxLayerSelection::Only(SfxLayer::Tonal);
+            event.edits.pitch = SfxScale::new(scale).unwrap();
+            event.edits.tonal = SfxTonalEdits {
+                carrier: SfxScale::new(scale).unwrap(),
+                fm_index: Unit::ONE,
+                fm_ratio: SfxScale::new(scale).unwrap(),
+                step_rate: Some(SfxStepRate::new(rate).unwrap()),
+                attack: SfxMilliseconds::new(milliseconds).unwrap(),
+                release: SfxMilliseconds::new(milliseconds).unwrap(),
+                pitch_ratios: Some(SfxTonalSequence::new([SfxScale::new(scale).unwrap(); 6])),
+            };
+            let frames = render_event(event, sample_rate).1;
+            assert!(
+                frames
+                    .iter()
+                    .flatten()
+                    .all(|sample| sample.is_finite() && sample.abs() < 1.0)
+            );
+            assert!(energy(&frames) > 0.0);
+        }
+    }
 }
 
 #[test]

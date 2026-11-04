@@ -6,7 +6,9 @@ use std::{
 
 use shzx_sfx::{
     Command, MarketContext, Mix, Mode, OutputGain, Pan, RenderConfig, Renderer, ReverbSettings,
-    SfxEvent, SfxKind, SpatialMode, Symbol, Trend, Unit,
+    SfxEdits, SfxEvent, SfxFilterBand, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerState,
+    SfxMilliseconds, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalSequence, SpatialMode, Symbol,
+    Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -85,17 +87,44 @@ impl Drop for AllocationScope {
 
 #[test]
 fn rendering_and_every_command_remain_allocation_free_after_construction() {
-    for sample_rate in [8_000, 48_000] {
+    for sample_rate in [8_000, 48_000, 192_000] {
         let mut renderer = Renderer::new(RenderConfig {
             sample_rate,
             max_voices: 4,
             ..RenderConfig::default()
         })
         .unwrap();
+        let mut edits = SfxEdits::default();
+        edits.pitch = SfxScale::new(4.0).unwrap();
+        edits.duration = SfxScale::new(4.0).unwrap();
+        edits.tonal = SfxTonalEdits {
+            carrier: SfxScale::new(4.0).unwrap(),
+            fm_index: Unit::ONE,
+            fm_ratio: SfxScale::new(4.0).unwrap(),
+            step_rate: Some(SfxStepRate::new(SfxStepRate::MAX_HZ).unwrap()),
+            attack: SfxMilliseconds::new(SfxMilliseconds::MIN).unwrap(),
+            release: SfxMilliseconds::new(SfxMilliseconds::MIN).unwrap(),
+            pitch_ratios: Some(SfxTonalSequence::new([SfxScale::new(4.0).unwrap(); 6])),
+        };
+        for layer in SfxLayer::ALL {
+            edits.set_layer(
+                layer,
+                SfxLayerEdits {
+                    state: if layer == SfxLayer::Texture {
+                        SfxLayerState::Muted
+                    } else {
+                        SfxLayerState::Audible
+                    },
+                    level: Some(Unit::ONE),
+                    filter: Some(SfxFilterBand::new(1_500.0, 24_000.0).unwrap()),
+                },
+            );
+        }
         let mut commands: Vec<_> = SfxKind::iter()
             .map(|kind| {
                 Command::Trigger(SfxEvent {
                     layers: shzx_sfx::SfxLayerSelection::All,
+                    edits: shzx_sfx::SfxEdits::DEFAULT,
                     kind,
                     pan: Pan::new(-0.8).unwrap(),
                     intensity: Unit::ONE,
@@ -103,6 +132,10 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             })
             .collect();
         commands.extend([
+            Command::Trigger(SfxEvent {
+                edits,
+                ..SfxEvent::new(SfxKind::OrderFill)
+            }),
             Command::Market(MarketContext {
                 trend: Trend::Bearish,
                 trend_strength: Unit::ONE,

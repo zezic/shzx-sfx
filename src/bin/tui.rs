@@ -1,6 +1,7 @@
 mod view;
 
 use std::{
+    collections::BTreeMap,
     io::{self, IsTerminal, Write},
     time::{Duration, Instant},
 };
@@ -19,7 +20,10 @@ use shzx_sfx::{
     OutputInfo, Pan, RenderConfig, ReverbSettings, SfxEvent, SfxKind, Snapshot, SpatialMode,
     Symbol, Trend, Unit,
 };
-use shzx_sfx::{SfxLayer, SfxLayerSelection};
+use shzx_sfx::{
+    SfxEdits, SfxFilterBand, SfxLayer, SfxLayerSelection, SfxLayerState, SfxMilliseconds,
+    SfxRecipe, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalSequence, SfxTonalStep,
+};
 use strum::IntoEnumIterator;
 
 use super::{CliResult, MixLayer, ReverbBus, ReverbField, invalid};
@@ -137,6 +141,13 @@ enum Control {
     Inspect,
     AuditionLayer(SfxLayer),
     AuditionAll,
+    MuteLayer(SfxLayer),
+    EditLayer(SfxLayer),
+    SfxParameter(SfxParameter),
+    SfxEditorPage(EditorPage),
+    ResetEffect,
+    ResetTonal,
+    CloseSfxEditor,
     Symbol,
     CommitSymbol,
     CancelSymbol,
@@ -160,10 +171,109 @@ enum Control {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SfxParameter {
+    Level,
+    Highpass,
+    Lowpass,
+    Pitch,
+    Duration,
+    Tonal(TonalParameter),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TonalParameter {
+    Carrier,
+    FmIndex,
+    FmRatio,
+    StepRate,
+    Attack,
+    Release,
+    StepPitch(SfxTonalStep),
+}
+
+impl TonalParameter {
+    const SYNTHESIS: [Self; 6] = [
+        Self::Carrier,
+        Self::FmIndex,
+        Self::FmRatio,
+        Self::StepRate,
+        Self::Attack,
+        Self::Release,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Carrier => "Carrier tuning",
+            Self::FmIndex => "FM index",
+            Self::FmRatio => "FM ratio",
+            Self::StepRate => "Step rate",
+            Self::Attack => "Slot attack",
+            Self::Release => "Slot release",
+            Self::StepPitch(step) => step.label(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorPage {
+    Mix,
+    Tone,
+    Sequence,
+}
+
+impl EditorPage {
+    const ALL: [Self; 3] = [Self::Mix, Self::Tone, Self::Sequence];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mix => "Mix",
+            Self::Tone => "Synthesis",
+            Self::Sequence => "Sequence",
+        }
+    }
+
+    fn parameters(self) -> impl Iterator<Item = SfxParameter> {
+        SfxParameter::ALL
+            .into_iter()
+            .chain(TonalParameter::SYNTHESIS.map(SfxParameter::Tonal))
+            .chain(
+                SfxTonalStep::ALL.map(|step| SfxParameter::Tonal(TonalParameter::StepPitch(step))),
+            )
+            .filter(move |parameter| match parameter {
+                SfxParameter::Tonal(TonalParameter::StepPitch(_)) => self == Self::Sequence,
+                SfxParameter::Tonal(_) => self == Self::Tone,
+                _ => self == Self::Mix,
+            })
+    }
+}
+
+impl SfxParameter {
+    const ALL: [Self; 5] = [
+        Self::Level,
+        Self::Highpass,
+        Self::Lowpass,
+        Self::Pitch,
+        Self::Duration,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Level => "Layer level",
+            Self::Highpass => "High-pass Hz",
+            Self::Lowpass => "Low-pass Hz",
+            Self::Pitch => "Event pitch",
+            Self::Duration => "Event duration",
+            Self::Tonal(parameter) => parameter.label(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Overlay {
     None,
     Help,
     SymbolEntry,
+    SfxEditor(EditorPage),
 }
 
 struct App {
@@ -179,6 +289,7 @@ struct App {
     spatial: SpatialMode,
     effect: SfxKind,
     inspector_layer: SfxLayer,
+    effect_edits: BTreeMap<SfxKind, SfxEdits>,
     event_pan: Pan,
     event_intensity: Unit,
     snapshot: Option<Snapshot>,
@@ -209,6 +320,7 @@ impl App {
             spatial: config.spatial,
             effect: SfxKind::Click,
             inspector_layer: SfxLayer::Texture,
+            effect_edits: BTreeMap::new(),
             event_pan: Pan::CENTER,
             event_intensity: Unit::new(0.6).expect("constant intensity is normalized"),
             snapshot: None,
@@ -283,6 +395,15 @@ impl App {
     }
 
     fn focus_order(&self) -> Vec<Control> {
+        if matches!(self.overlay, Overlay::SfxEditor(_)) {
+            return EditorPage::ALL
+                .into_iter()
+                .filter(|_| self.inspector_layer == SfxLayer::Tonal)
+                .map(Control::SfxEditorPage)
+                .chain(self.editor_parameters().map(Control::SfxParameter))
+                .chain(self.editor_actions().map(|(control, _)| control))
+                .collect();
+        }
         let mut controls = match self.tab {
             Tab::Scene => [Mode::Browse, Mode::Dialog, Mode::Focus]
                 .map(Control::SetMode)
@@ -312,12 +433,12 @@ impl App {
                 Control::AuditionAll,
             ]
             .into_iter()
-            .chain(SfxLayer::ALL.map(Control::AuditionLayer))
+            .chain(SfxLayer::ALL.into_iter().flat_map(Self::layer_controls))
             .collect(),
             Tab::Monitor => Vec::new(),
             Tab::Inspect => [Control::AuditionAll]
                 .into_iter()
-                .chain(SfxLayer::ALL.map(Control::AuditionLayer))
+                .chain(SfxLayer::ALL.into_iter().flat_map(Self::layer_controls))
                 .collect(),
             Tab::Reverb => ReverbBus::ALL
                 .into_iter()
@@ -333,6 +454,14 @@ impl App {
         controls
     }
 
+    fn layer_controls(layer: SfxLayer) -> [Control; 3] {
+        [
+            Control::AuditionLayer(layer),
+            Control::MuteLayer(layer),
+            Control::EditLayer(layer),
+        ]
+    }
+
     fn move_focus(&mut self, offset: isize) {
         let controls = self.focus_order();
         let current = controls
@@ -341,7 +470,10 @@ impl App {
             .expect("focused control belongs to the selected tab");
         self.focus =
             controls[(current as isize + offset).rem_euclid(controls.len() as isize) as usize];
-        if let Control::AuditionLayer(layer) = self.focus {
+        if let Control::AuditionLayer(layer)
+        | Control::MuteLayer(layer)
+        | Control::EditLayer(layer) = self.focus
+        {
             self.inspector_layer = layer;
         }
     }
@@ -370,11 +502,55 @@ impl App {
         match control {
             Control::Inspect => self.select_tab(Tab::Inspect),
             Control::AuditionAll => self.fire(self.effect, send),
+            Control::MuteLayer(layer) => {
+                self.inspector_layer = layer;
+                let edits = self.effect_edits.entry(self.effect).or_default();
+                let mut settings = edits.layer(layer);
+                settings.state = match settings.state {
+                    SfxLayerState::Audible => SfxLayerState::Muted,
+                    SfxLayerState::Muted => SfxLayerState::Audible,
+                };
+                edits.set_layer(layer, settings);
+                self.notice = format!(
+                    "{} {}. Play mix auditions the current settings.",
+                    layer.label(),
+                    if settings.state == SfxLayerState::Muted {
+                        "muted"
+                    } else {
+                        "unmuted"
+                    }
+                );
+            }
+            Control::EditLayer(layer) => {
+                self.inspector_layer = layer;
+                let page = if layer == SfxLayer::Tonal {
+                    EditorPage::Tone
+                } else {
+                    EditorPage::Mix
+                };
+                self.select_editor_page(page);
+            }
+            Control::SfxEditorPage(page) => self.select_editor_page(page),
+            Control::CloseSfxEditor => {
+                self.overlay = Overlay::None;
+                self.focus = Control::EditLayer(self.inspector_layer);
+            }
+            Control::ResetEffect => {
+                self.effect_edits.remove(&self.effect);
+                self.notice = format!("{} restored to its original sound settings.", self.effect);
+            }
+            Control::ResetTonal => {
+                assert_eq!(self.inspector_layer, SfxLayer::Tonal);
+                self.effect_edits.entry(self.effect).or_default().tonal = SfxTonalEdits::DEFAULT;
+                self.notice = format!(
+                    "{} tonal synthesis restored. Layer mix settings retained.",
+                    self.effect
+                );
+            }
             Control::AuditionLayer(layer) => {
                 self.inspector_layer = layer;
                 let profile = self
-                    .effect
-                    .recipe()
+                    .edited_recipe()
                     .layers
                     .into_iter()
                     .find(|profile| profile.layer == layer)
@@ -468,6 +644,7 @@ impl App {
                     }
                 }
                 self.muted_level = None;
+                self.effect_edits.clear();
                 self.event_pan = Pan::CENTER;
                 self.event_intensity = Unit::new(0.6).expect("constant intensity is normalized");
                 self.notice =
@@ -479,7 +656,8 @@ impl App {
             | Control::OutputGain
             | Control::Reverb(_, _)
             | Control::EventPan
-            | Control::EventIntensity => {}
+            | Control::EventIntensity
+            | Control::SfxParameter(_) => {}
         }
         false
     }
@@ -488,21 +666,84 @@ impl App {
         self.fire_layers(kind, SfxLayerSelection::All, send);
     }
 
+    fn current_edits(&self) -> SfxEdits {
+        self.effect_edits
+            .get(&self.effect)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn event(&self, kind: SfxKind, layers: SfxLayerSelection) -> SfxEvent {
+        SfxEvent {
+            kind,
+            layers,
+            pan: self.event_pan,
+            intensity: self.event_intensity,
+            edits: self.effect_edits.get(&kind).copied().unwrap_or_default(),
+        }
+    }
+
+    fn edited_recipe(&self) -> SfxRecipe {
+        self.event(self.effect, SfxLayerSelection::All).recipe()
+    }
+
+    fn select_editor_page(&mut self, page: EditorPage) {
+        assert!(page == EditorPage::Mix || self.inspector_layer == SfxLayer::Tonal);
+        self.overlay = Overlay::SfxEditor(page);
+        self.focus = Control::SfxParameter(
+            page.parameters()
+                .next()
+                .expect("editor pages contain parameters"),
+        );
+    }
+
+    fn editor_parameters(&self) -> impl Iterator<Item = SfxParameter> {
+        let Overlay::SfxEditor(page) = self.overlay else {
+            panic!("editor parameters require an open editor")
+        };
+        page.parameters()
+    }
+
+    fn editor_actions(&self) -> impl Iterator<Item = (Control, &'static str)> {
+        let Overlay::SfxEditor(page) = self.overlay else {
+            panic!("editor actions require an open editor")
+        };
+        let reset = if page == EditorPage::Mix {
+            (
+                Control::ResetEffect,
+                if self.inspector_layer == SfxLayer::Tonal {
+                    "Reset event"
+                } else {
+                    "Reset event / R"
+                },
+            )
+        } else {
+            (Control::ResetTonal, "Reset tone")
+        };
+        (self.inspector_layer == SfxLayer::Tonal)
+            .then_some((Control::AuditionLayer(SfxLayer::Tonal), "Play tone"))
+            .into_iter()
+            .chain([
+                (
+                    Control::AuditionAll,
+                    if self.inspector_layer == SfxLayer::Tonal {
+                        "Play mix"
+                    } else {
+                        "Play mix / Space"
+                    },
+                ),
+                reset,
+                (Control::CloseSfxEditor, "Close / Esc"),
+            ])
+    }
+
     fn fire_layers(
         &mut self,
         kind: SfxKind,
         layers: SfxLayerSelection,
         send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
     ) {
-        self.submit(
-            Command::Trigger(SfxEvent {
-                layers,
-                kind,
-                pan: self.event_pan,
-                intensity: self.event_intensity,
-            }),
-            send,
-        );
+        self.submit(Command::Trigger(self.event(kind, layers)), send);
         if matches!(self.focus, Control::SelectEffect(_)) {
             self.focus = Control::SelectEffect(self.effect);
         }
@@ -532,6 +773,68 @@ impl App {
             Control::Reverb(bus, field) => (field.get(bus.get(self.reverb)).get(), 0.0, 1.0),
             Control::EventPan => (self.event_pan.get(), -1.0, 1.0),
             Control::EventIntensity => (self.event_intensity.get(), 0.0, 1.0),
+            Control::SfxParameter(parameter) => {
+                let recipe = self.edited_recipe();
+                let profile = recipe
+                    .layers
+                    .iter()
+                    .find(|profile| profile.layer == self.inspector_layer)
+                    .expect("every selectable layer has a recipe");
+                match parameter {
+                    SfxParameter::Level => (profile.level, 0.0, 1.0),
+                    SfxParameter::Highpass => (
+                        profile.highpass_hz,
+                        SfxFilterBand::MIN_HZ,
+                        (profile.lowpass_hz - 1.0).min(SfxFilterBand::MAX_HZ),
+                    ),
+                    SfxParameter::Lowpass => (
+                        profile.lowpass_hz,
+                        (profile.highpass_hz + 1.0).max(SfxFilterBand::MIN_HZ),
+                        SfxFilterBand::MAX_HZ,
+                    ),
+                    SfxParameter::Pitch => (
+                        self.current_edits().pitch.get(),
+                        SfxScale::MIN,
+                        SfxScale::MAX,
+                    ),
+                    SfxParameter::Duration => (
+                        self.current_edits().duration.get(),
+                        SfxScale::MIN,
+                        SfxScale::MAX,
+                    ),
+                    SfxParameter::Tonal(parameter) => {
+                        assert_eq!(self.inspector_layer, SfxLayer::Tonal);
+                        let tonal = self.current_edits().tonal;
+                        match parameter {
+                            TonalParameter::Carrier => {
+                                (tonal.carrier.get(), SfxScale::MIN, SfxScale::MAX)
+                            }
+                            TonalParameter::FmIndex => (tonal.fm_index.get(), 0.0, 1.0),
+                            TonalParameter::FmRatio => {
+                                (tonal.fm_ratio.get(), SfxScale::MIN, SfxScale::MAX)
+                            }
+                            TonalParameter::StepRate => (
+                                (recipe.tonal_rate_hz[0] + recipe.tonal_rate_hz[1]) * 0.5,
+                                SfxStepRate::MIN_HZ,
+                                SfxStepRate::MAX_HZ,
+                            ),
+                            TonalParameter::Attack => (
+                                tonal.attack.get(),
+                                SfxMilliseconds::MIN,
+                                SfxMilliseconds::MAX,
+                            ),
+                            TonalParameter::Release => (
+                                tonal.release.get(),
+                                SfxMilliseconds::MIN,
+                                SfxMilliseconds::MAX,
+                            ),
+                            TonalParameter::StepPitch(step) => {
+                                (recipe.tonal_pitch_ratio(step), SfxScale::MIN, SfxScale::MAX)
+                            }
+                        }
+                    }
+                }
+            }
             _ => return None,
         })
     }
@@ -579,6 +882,90 @@ impl App {
             }
             Control::EventIntensity => {
                 self.event_intensity = Unit::new(next).expect("intensity slider is normalized")
+            }
+            Control::SfxParameter(parameter) => {
+                let mut edits = self.current_edits();
+                let mut layer = edits.layer(self.inspector_layer);
+                match parameter {
+                    SfxParameter::Level => {
+                        layer.level = Some(Unit::new(next).expect("layer level is normalized"))
+                    }
+                    SfxParameter::Highpass | SfxParameter::Lowpass => {
+                        let profile = self
+                            .edited_recipe()
+                            .layers
+                            .into_iter()
+                            .find(|profile| profile.layer == self.inspector_layer)
+                            .expect("every selectable layer has a recipe");
+                        let (highpass, lowpass) = if parameter == SfxParameter::Highpass {
+                            (next, profile.lowpass_hz)
+                        } else {
+                            (profile.highpass_hz, next)
+                        };
+                        layer.filter = Some(
+                            SfxFilterBand::new(highpass, lowpass)
+                                .expect("filter sliders preserve an ordered band"),
+                        );
+                    }
+                    SfxParameter::Pitch => {
+                        edits.pitch = SfxScale::new(next).expect("pitch slider is bounded")
+                    }
+                    SfxParameter::Duration => {
+                        edits.duration = SfxScale::new(next).expect("duration slider is bounded")
+                    }
+                    SfxParameter::Tonal(parameter) => match parameter {
+                        TonalParameter::Carrier => {
+                            edits.tonal.carrier =
+                                SfxScale::new(next).expect("carrier tuning slider is bounded")
+                        }
+                        TonalParameter::FmIndex => {
+                            edits.tonal.fm_index =
+                                Unit::new(next).expect("FM index slider is normalized")
+                        }
+                        TonalParameter::FmRatio => {
+                            edits.tonal.fm_ratio =
+                                SfxScale::new(next).expect("FM ratio slider is bounded")
+                        }
+                        TonalParameter::StepRate => {
+                            edits.tonal.step_rate =
+                                Some(SfxStepRate::new(next).expect("step rate slider is bounded"))
+                        }
+                        TonalParameter::Attack => {
+                            edits.tonal.attack =
+                                SfxMilliseconds::new(next).expect("attack slider is bounded")
+                        }
+                        TonalParameter::Release => {
+                            edits.tonal.release =
+                                SfxMilliseconds::new(next).expect("release slider is bounded")
+                        }
+                        TonalParameter::StepPitch(step) => {
+                            let mut sequence = edits.tonal.pitch_ratios.unwrap_or_else(|| {
+                                SfxTonalSequence::new(self.edited_recipe().tonal_pitch_ratios.map(
+                                    |ratio| {
+                                        SfxScale::new(ratio)
+                                            .expect("recipe pitch ratios are bounded")
+                                    },
+                                ))
+                            });
+                            sequence.set(
+                                step,
+                                SfxScale::new(next).expect("step pitch slider is bounded"),
+                            );
+                            edits.tonal.pitch_ratios = Some(sequence);
+                        }
+                    },
+                }
+                edits.set_layer(self.inspector_layer, layer);
+                self.effect_edits.insert(self.effect, edits);
+                self.notice = format!(
+                    "{} settings updated. Space auditions {}; Esc closes.",
+                    self.effect,
+                    if self.inspector_layer == SfxLayer::Tonal {
+                        "Tonal"
+                    } else {
+                        "the mix"
+                    }
+                );
             }
             _ => unreachable!("numeric controls are exhaustively handled"),
         }
@@ -652,6 +1039,48 @@ impl App {
         if key.kind == KeyEventKind::Repeat && !repeatable {
             return false;
         }
+        if let Overlay::SfxEditor(page) = self.overlay {
+            match key.code {
+                KeyCode::Esc => {
+                    self.activate(Control::CloseSfxEditor, send);
+                }
+                KeyCode::Char('q') => return true,
+                KeyCode::Char(' ') if self.inspector_layer == SfxLayer::Tonal => {
+                    self.activate(Control::AuditionLayer(SfxLayer::Tonal), send);
+                }
+                KeyCode::Char(' ') => self.fire(self.effect, send),
+                KeyCode::Char('m') => {
+                    self.activate(Control::MuteLayer(self.inspector_layer), send);
+                }
+                KeyCode::Char('r') => {
+                    self.activate(
+                        if page == EditorPage::Mix {
+                            Control::ResetEffect
+                        } else {
+                            Control::ResetTonal
+                        },
+                        send,
+                    );
+                }
+                KeyCode::PageUp | KeyCode::PageDown if self.inspector_layer == SfxLayer::Tonal => {
+                    let index = EditorPage::ALL
+                        .into_iter()
+                        .position(|candidate| candidate == page)
+                        .expect("editor page exists");
+                    let offset = if key.code == KeyCode::PageDown {
+                        1
+                    } else {
+                        EditorPage::ALL.len() - 1
+                    };
+                    self.select_editor_page(
+                        EditorPage::ALL[(index + offset) % EditorPage::ALL.len()],
+                    );
+                }
+                KeyCode::Enter => return self.activate(self.focus, send),
+                _ => self.focus_key(key, send),
+            }
+            return false;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('?') => self.overlay = Overlay::Help,
@@ -671,58 +1100,11 @@ impl App {
             KeyCode::Char('r') => {
                 return self.activate(Control::Reset, send);
             }
-            KeyCode::Tab => self.move_focus(if key.modifiers.contains(KeyModifiers::SHIFT) {
-                -1
-            } else {
-                1
-            }),
-            KeyCode::BackTab => self.move_focus(-1),
             KeyCode::Up | KeyCode::Down if matches!(self.focus, Control::SelectEffect(_)) => {
                 self.select_effect(if key.code == KeyCode::Up { -1 } else { 1 })
             }
             KeyCode::PageUp | KeyCode::PageDown if matches!(self.tab, Tab::Sfx | Tab::Inspect) => {
                 self.select_effect(if key.code == KeyCode::PageUp { -8 } else { 8 })
-            }
-            KeyCode::Up => self.move_focus(-1),
-            KeyCode::Down => self.move_focus(1),
-            KeyCode::Left | KeyCode::Right if self.numeric(self.focus).is_some() => {
-                let unit_step = if self.focus == Control::OutputGain {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        0.25
-                    } else {
-                        1.0
-                    }
-                } else if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    0.01
-                } else {
-                    0.05
-                };
-                let step = if self.focus == Control::EventPan {
-                    unit_step * 2.0
-                } else {
-                    unit_step
-                };
-                self.adjust(
-                    self.focus,
-                    if key.code == KeyCode::Left {
-                        -step
-                    } else {
-                        step
-                    },
-                    send,
-                );
-            }
-            KeyCode::Left => self.move_focus(-1),
-            KeyCode::Right => self.move_focus(1),
-            KeyCode::Home | KeyCode::End if self.numeric(self.focus).is_some() => {
-                let (current, low, high) = self
-                    .numeric(self.focus)
-                    .expect("numeric control was checked");
-                self.adjust(
-                    self.focus,
-                    if key.code == KeyCode::Home { low } else { high } - current,
-                    send,
-                );
             }
             KeyCode::Home | KeyCode::End if matches!(self.focus, Control::SelectEffect(_)) => {
                 self.effect = if key.code == KeyCode::Home {
@@ -743,9 +1125,63 @@ impl App {
                 );
             }
             KeyCode::Enter | KeyCode::Char(' ') => return self.activate(self.focus, send),
-            _ => {}
+            _ => self.focus_key(key, send),
         }
         false
+    }
+
+    fn focus_key(&mut self, key: KeyEvent, send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>) {
+        match key.code {
+            KeyCode::Tab => self.move_focus(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                -1
+            } else {
+                1
+            }),
+            KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
+            KeyCode::Down => self.move_focus(1),
+            KeyCode::Left | KeyCode::Right if self.numeric(self.focus).is_some() => {
+                let step =
+                    Self::numeric_step(self.focus, key.modifiers.contains(KeyModifiers::SHIFT));
+                self.adjust(
+                    self.focus,
+                    if key.code == KeyCode::Left {
+                        -step
+                    } else {
+                        step
+                    },
+                    send,
+                );
+            }
+            KeyCode::Home | KeyCode::End if self.numeric(self.focus).is_some() => {
+                let (current, low, high) = self
+                    .numeric(self.focus)
+                    .expect("numeric control was checked");
+                self.adjust(
+                    self.focus,
+                    if key.code == KeyCode::Home { low } else { high } - current,
+                    send,
+                );
+            }
+            KeyCode::Left => self.move_focus(-1),
+            KeyCode::Right => self.move_focus(1),
+            _ => {}
+        }
+    }
+
+    fn numeric_step(control: Control, fine: bool) -> f32 {
+        let (normal_step, fine_step) = match control {
+            Control::OutputGain => (1.0, 0.25),
+            Control::SfxParameter(SfxParameter::Highpass | SfxParameter::Lowpass) => (100.0, 10.0),
+            Control::SfxParameter(SfxParameter::Level) => (0.01, 0.001),
+            Control::SfxParameter(SfxParameter::Tonal(TonalParameter::FmIndex)) => (0.01, 0.001),
+            Control::SfxParameter(SfxParameter::Tonal(TonalParameter::StepRate)) => (10.0, 1.0),
+            Control::SfxParameter(SfxParameter::Tonal(
+                TonalParameter::Attack | TonalParameter::Release,
+            )) => (0.05, 0.01),
+            Control::EventPan => (0.1, 0.02),
+            _ => (0.05, 0.01),
+        };
+        if fine { fine_step } else { normal_step }
     }
 }
 
@@ -846,7 +1282,9 @@ fn control_panel(engine: &mut AudioEngine, config: RenderConfig) -> CliResult<()
             Event::Mouse(mouse) if app.overlay != Overlay::Help => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(control) = hits.at(mouse.column, mouse.row) {
-                        if app.overlay == Overlay::None && !matches!(control, Control::Tab(_)) {
+                        if matches!(app.overlay, Overlay::None | Overlay::SfxEditor(_))
+                            && !matches!(control, Control::Tab(_))
+                        {
                             app.focus = control;
                         }
                         if app.numeric(control).is_some() {
@@ -857,14 +1295,16 @@ fn control_panel(engine: &mut AudioEngine, config: RenderConfig) -> CliResult<()
                         }
                     }
                 }
-                MouseEventKind::Drag(MouseButton::Left) if app.overlay == Overlay::None => {
+                MouseEventKind::Drag(MouseButton::Left)
+                    if matches!(app.overlay, Overlay::None | Overlay::SfxEditor(_)) =>
+                {
                     if let Some(control) = dragging {
                         slide(&mut app, &hits, control, mouse.column, &mut send);
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => dragging = None,
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    if app.overlay == Overlay::None =>
+                    if matches!(app.overlay, Overlay::None | Overlay::SfxEditor(_)) =>
                 {
                     let direction = if mouse.kind == MouseEventKind::ScrollUp {
                         -1
@@ -876,8 +1316,12 @@ fn control_panel(engine: &mut AudioEngine, config: RenderConfig) -> CliResult<()
                         .filter(|&control| app.numeric(control).is_some())
                     {
                         app.focus = control;
-                        app.adjust(control, -direction as f32 * 0.05, &mut send);
-                    } else if app.tab == Tab::Sfx {
+                        app.adjust(
+                            control,
+                            -direction as f32 * App::numeric_step(control, false),
+                            &mut send,
+                        );
+                    } else if app.tab == Tab::Sfx && app.overlay == Overlay::None {
                         app.select_effect(direction);
                     } else {
                         app.move_focus(direction);

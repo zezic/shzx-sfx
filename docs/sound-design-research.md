@@ -258,6 +258,15 @@ Shimmer uses a 7.2 kHz HP and 16 kHz LP around a nominal 8.4-12.5 kHz carrier,
 PM depth 0.035 cycles at 0.7 Hz, and a short bounded window. It is disabled
 below 20 kHz sample rate. Filter bands are clamped for the actual sample rate.
 
+The Tonal editor exposes the sine carrier's tuning, FM index and modulator
+ratio, six pitch ratios, a separate step rate, and slot attack/release. Its
+signal passes through the slot gate, the event envelope, and the Tonal HP/LP
+filters. The default clock follows the seeded 230-670 Hz detail rate and
+starting position; an edited rate changes only Tonal. Carrier and sequence
+ratios remain relative to the event's pitch, preserving whole-event
+transposition while allowing Tonal to be tuned independently. Resetting its
+synthesis retains its level, mute, and filter settings.
+
 Recipe metadata comes from the same profiles used by rendering: relative
 gains, carriers, filters and gestures, envelope timing, per-kind patch
 parameters, FM/PM and quantizer values, clock ranges, fleck bursts, and pitch

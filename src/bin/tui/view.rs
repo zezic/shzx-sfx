@@ -8,13 +8,15 @@ use ratatui::{
 };
 use shzx_sfx::{
     AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState, DelaySnapshot,
-    GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxGenerator, SfxKind, SfxLayer,
-    SfxLayerRecipe, SfxLayerSelection, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend,
-    Unit,
+    GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer, SfxLayerRecipe,
+    SfxLayerSelection, SfxLayerState, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
-use super::{App, Control, MarketField, Overlay, Preset, ReverbBus, ReverbField, Tab};
+use super::{
+    App, Control, EditorPage, MarketField, Overlay, Preset, ReverbBus, ReverbField, SfxParameter,
+    Tab, TonalParameter,
+};
 use crate::MixLayer;
 
 const BACKGROUND: Color = Color::Rgb(8, 15, 21);
@@ -156,6 +158,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App) -> HitMap {
             return HitMap::default();
         }
         Overlay::SymbolEntry => return symbol_entry(frame, area, app),
+        Overlay::SfxEditor(page) => return sfx_editor(frame, area, app, page),
     }
     hits
 }
@@ -711,16 +714,22 @@ fn compact_slider(
 }
 
 fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
-    let recipe = app.effect.recipe();
+    let recipe = app.edited_recipe();
+    let edits = app.current_edits();
+    let recipe_label = if edits == shzx_sfx::SfxEdits::default() {
+        "Nominal"
+    } else {
+        "Edited"
+    };
     let compact = area.width < 72;
     let inner = panel(
         frame,
         area,
         if compact {
-            format!(" BUILD / {} / Nominal ", app.effect)
+            format!(" BUILD / {} / {recipe_label} ", app.effect)
         } else {
             format!(
-                " BUILD / {} / Nominal / EQ{} {:.0}dB Q{:.2} ",
+                " BUILD / {} / {recipe_label} / EQ{} {:.0}dB Q{:.2} ",
                 app.effect,
                 compact_hz(recipe.eq.center_hz),
                 recipe.eq.gain_db,
@@ -763,7 +772,7 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         Rect::new(inner.x, inner.y, inner.width.saturating_sub(14), 1),
     );
     frame.render_widget(
-        Paragraph::new("[ Play all ]").style(Style::default().fg(CYAN).bg(
+        Paragraph::new("[ Play mix ]").style(Style::default().fg(CYAN).bg(
             if app.focus == Control::AuditionAll {
                 FOCUSED
             } else {
@@ -777,22 +786,29 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     for (index, layer) in recipe.layers.iter().enumerate() {
         let control = Control::AuditionLayer(layer.layer);
         let selected = app.inspector_layer == layer.layer;
+        let muted = edits.layer(layer.layer).state == SfxLayerState::Muted;
         let available = app.output.sample_rate >= layer.minimum_sample_rate;
         let timing = if available {
             format!("{:.0}+{:.0}ms", layer.start_ms, layer.duration_ms)
         } else {
             format!("needs {}kHz", layer.minimum_sample_rate / 1000)
         };
-        let row = Rect::new(inner.x, inner.y + index as u16 + 1, inner.width, 1);
-        let text = if compact {
+        let row = Rect::new(inner.x, inner.y + index as u16 + 1, inner.width - 15, 1);
+        let text = if compact || !available {
+            let detail = if available {
+                format!(
+                    "{}/{}",
+                    compact_hz(layer.highpass_hz),
+                    compact_hz(layer.lowpass_hz)
+                )
+            } else {
+                timing.clone()
+            };
             format!(
-                "{} {:<7} {:>5}dB {:<8} {:>4}/{:<4} {timing}",
+                "{} {:<7} {:>5}dB {detail}",
                 if selected { ">" } else { " " },
                 layer.layer.label(),
                 db(layer.level),
-                generator_short(layer.generator),
-                compact_hz(layer.highpass_hz),
-                compact_hz(layer.lowpass_hz)
             )
         } else {
             format!(
@@ -808,7 +824,9 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         frame.render_widget(
             Paragraph::new(text).style(
                 Style::default()
-                    .fg(if selected {
+                    .fg(if muted {
+                        DIM
+                    } else if selected {
                         CYAN
                     } else if layer.layer == SfxLayer::Texture {
                         AMBER
@@ -820,6 +838,22 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             row,
         );
         hits.add(row, control);
+        inline_button(
+            frame,
+            Rect::new(row.right() + 1, row.y, 8, 1),
+            if muted { "[Unmute]" } else { "[Mute]" },
+            Control::MuteLayer(layer.layer),
+            app,
+            hits,
+        );
+        inline_button(
+            frame,
+            Rect::new(row.right() + 9, row.y, 6, 1),
+            "[Edit]",
+            Control::EditLayer(layer.layer),
+            app,
+            hits,
+        );
     }
 
     let selected = recipe
@@ -949,10 +983,29 @@ fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             Rect::new(inner.x, detail_y + 5, inner.width, source_rows),
         );
         let note_row = detail_offset + 5 + source_rows;
-        frame.render_widget(Paragraph::new("Click/Enter solos at the real mix level. Play all restores the complete event.\nRecipe values are nominal; each playback chooses a new seeded variation.")
+        frame.render_widget(Paragraph::new("Click/Enter solos a layer. Play mix keeps layer mutes and edits.\nEdit adjusts layer level/filters and event pitch/duration. Each play varies the seed.")
             .style(Style::default().fg(DIM)).wrap(Wrap { trim: true }),
             Rect::new(inner.x, inner.y + note_row, inner.width, inner.height.saturating_sub(note_row)));
     }
+}
+
+fn inline_button(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    control: Control,
+    app: &App,
+    hits: &mut HitMap,
+) {
+    frame.render_widget(
+        Paragraph::new(label.to_owned()).style(
+            Style::default()
+                .fg(CYAN)
+                .bg(if app.focus == control { FOCUSED } else { PANEL }),
+        ),
+        area,
+    );
+    hits.add(area, control);
 }
 
 fn compact_hz(value: f32) -> String {
@@ -960,17 +1013,6 @@ fn compact_hz(value: f32) -> String {
         format!("{:.1}k", value / 1000.0)
     } else {
         format!("{value:.0}")
-    }
-}
-
-fn generator_short(generator: SfxGenerator) -> &'static str {
-    match generator {
-        SfxGenerator::PulseBody => "pulse",
-        SfxGenerator::Intermodulation => "intermod",
-        SfxGenerator::TonalSequence => "FM steps",
-        SfxGenerator::FilteredNoise => "noise",
-        SfxGenerator::PhaseTone => "PM tone",
-        SfxGenerator::HighIntermodulation => "HF mix",
     }
 }
 
@@ -1643,7 +1685,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
             Line::raw("Enter           Activate the focused button"),
             Line::raw("Space           Audition the selected effect"),
             Line::raw("I / Inspect     Show layers; PgUp/Down browses inspected sounds"),
-            Line::raw(""),
+            Line::raw("Inspector Mute/Edit buttons change layers for the next play."),
             Line::styled(
                 "Mouse",
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
@@ -1760,6 +1802,149 @@ fn symbol_entry(frame: &mut Frame<'_>, area: Rect, app: &App) -> HitMap {
             );
             hits.add(button_area, control);
         }
+    }
+    hits
+}
+
+fn sfx_editor(frame: &mut Frame<'_>, area: Rect, app: &App, page: EditorPage) -> HitMap {
+    let width = area.width.min(72);
+    let height = area.height.min(18);
+    let rectangle = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rectangle);
+    let inner = panel(frame, rectangle, format!(" EDIT / {} ", app.effect));
+    let mut hits = HitMap::default();
+    if inner.height < 16 || inner.width < 50 {
+        frame.render_widget(
+            Paragraph::new("Enlarge the terminal to edit. Esc closes.")
+                .style(Style::default().fg(AMBER))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return hits;
+    }
+    let muted = app.current_edits().layer(app.inspector_layer).state == SfxLayerState::Muted;
+    let tonal = app.inspector_layer == SfxLayer::Tonal;
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} layer{} | M toggles mute",
+            app.inspector_layer.label(),
+            if muted { " / MUTED" } else { "" },
+        ))
+        .style(Style::default().fg(if muted { AMBER } else { CYAN })),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    if tonal {
+        for (page_control, rectangle) in EditorPage::ALL.into_iter().zip(buttons::<3>(Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            1,
+        ))) {
+            frame.render_widget(
+                Paragraph::new(format!("[ {} ]", page_control.label()))
+                    .alignment(Alignment::Center)
+                    .style(
+                        Style::default()
+                            .fg(if page == page_control { AMBER } else { CYAN })
+                            .bg(if app.focus == Control::SfxEditorPage(page_control) {
+                                FOCUSED
+                            } else {
+                                PANEL
+                            }),
+                    ),
+                rectangle,
+            );
+            hits.add(rectangle, Control::SfxEditorPage(page_control));
+        }
+    }
+    let recipe = app.edited_recipe();
+    for (index, parameter) in app.editor_parameters().enumerate() {
+        let control = Control::SfxParameter(parameter);
+        let (current, low, high) = app.numeric(control).expect("SFX parameters are numeric");
+        let display = match parameter {
+            SfxParameter::Level => format!("{:.1}%", current * 100.0),
+            SfxParameter::Highpass | SfxParameter::Lowpass => format!("{current:.0} Hz"),
+            SfxParameter::Pitch | SfxParameter::Duration => format!("{current:.2}x"),
+            SfxParameter::Tonal(parameter) => match parameter {
+                TonalParameter::Carrier => {
+                    format!("{current:.2}x / {:.0}Hz", recipe.tonal_base_hz)
+                }
+                TonalParameter::FmIndex => format!("{current:.3}"),
+                TonalParameter::FmRatio => format!("{current:.2}x"),
+                TonalParameter::StepRate => {
+                    if app.current_edits().tonal.step_rate.is_none() {
+                        format!(
+                            "auto {:.0}-{:.0} Hz",
+                            recipe.tonal_rate_hz[0], recipe.tonal_rate_hz[1]
+                        )
+                    } else {
+                        format!("{current:.0} Hz")
+                    }
+                }
+                TonalParameter::Attack | TonalParameter::Release => format!("{current:.2} ms"),
+                TonalParameter::StepPitch(_) => {
+                    format!("{current:.2}x / {:.0}Hz", recipe.tonal_base_hz * current)
+                }
+            },
+        };
+        slider(
+            frame,
+            Rect::new(inner.x, inner.y + index as u16 + 2, inner.width, 1),
+            parameter.label(),
+            SliderValue {
+                position: if low == high {
+                    0.0
+                } else {
+                    (current - low) / (high - low)
+                },
+                display,
+            },
+            control,
+            app,
+            &mut hits,
+        );
+    }
+    let explanation = if tonal {
+        "Sine + sine FM -> six pitch steps -> slot attack/release\n-> event envelope -> HP/LP. Mix pitch/duration affect the whole event."
+    } else {
+        "Level / HP / LP apply to this layer.\nPitch / duration affect the whole event."
+    };
+    frame.render_widget(
+        Paragraph::new(explanation).style(Style::default().fg(CYAN)),
+        Rect::new(inner.x, inner.y + 8, inner.width, 2),
+    );
+    frame.render_widget(
+        Paragraph::new(if tonal {
+            "Arrows adjust; Shift is finer. Space auditions Tonal; Esc closes.\nPgUp/Down pages. Edits apply next play and stay for this session."
+        } else {
+            "Arrows adjust; Shift is finer. Space auditions mix; Esc closes.\nEdits apply on the next play and stay for this session."
+        })
+        .style(Style::default().fg(DIM)),
+        Rect::new(inner.x, inner.y + 10, inner.width, 2),
+    );
+    frame.render_widget(
+        Paragraph::new(app.notice.as_str())
+            .style(Style::default().fg(AMBER))
+            .wrap(Wrap { trim: true }),
+        Rect::new(inner.x, inner.y + 12, inner.width, 1),
+    );
+    let actions = Rect::new(inner.x, inner.bottom() - 3, inner.width, 3);
+    let action_count = app.editor_actions().count();
+    for (index, (control, label)) in app.editor_actions().enumerate() {
+        let left = actions.width as usize * index / action_count;
+        let right = actions.width as usize * (index + 1) / action_count;
+        let rectangle = Rect::new(
+            actions.x + left as u16,
+            actions.y,
+            (right - left - 1) as u16,
+            actions.height,
+        );
+        button(frame, rectangle, label, control, false, app, &mut hits);
     }
     hits
 }
@@ -1985,7 +2170,7 @@ mod tests {
                 "PALETTE /",
                 "BUILD / error",
                 "Nominal",
-                "Play all",
+                "Play mix",
                 "EQ3.0k -9dB",
                 "Crisp",
             ] {
@@ -2014,9 +2199,16 @@ mod tests {
                 );
             }
             assert!(hits.region(Control::EventPan).unwrap().width >= 10);
-            for control in [Control::AuditionAll]
-                .into_iter()
-                .chain(SfxLayer::ALL.map(Control::AuditionLayer))
+            for control in
+                [Control::AuditionAll]
+                    .into_iter()
+                    .chain(SfxLayer::ALL.into_iter().flat_map(|layer| {
+                        [
+                            Control::AuditionLayer(layer),
+                            Control::MuteLayer(layer),
+                            Control::EditLayer(layer),
+                        ]
+                    }))
             {
                 let region = hits
                     .region(control)
@@ -2039,6 +2231,134 @@ mod tests {
                         .all(|other| !hit.area.intersects(other.area)),
                     "inspector and palette mouse targets overlap at {width}x{height}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn inspector_shows_layer_mutes_and_editor_captures_mouse_targets() {
+        use shzx_sfx::{SfxFilterBand, SfxLayerEdits, SfxScale};
+
+        let mut app = app();
+        app.effect = SfxKind::Confirm;
+        app.inspector_layer = SfxLayer::Tonal;
+        let mut edits = app.current_edits();
+        edits.pitch = SfxScale::new(1.25).unwrap();
+        edits.duration = SfxScale::new(2.0).unwrap();
+        edits.set_layer(
+            SfxLayer::Tonal,
+            SfxLayerEdits {
+                state: SfxLayerState::Muted,
+                level: Some(Unit::new(0.2).unwrap()),
+                filter: Some(SfxFilterBand::new(1_200.0, 4_000.0).unwrap()),
+            },
+        );
+        app.effect_edits.insert(app.effect, edits);
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            for tab in [Tab::Sfx, Tab::Inspect] {
+                app.select_tab(tab);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        draw(frame, &app);
+                    })
+                    .unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(text.contains("Edited") && text.contains("[Unmute]"));
+
+                for page in EditorPage::ALL {
+                    app.overlay = Overlay::SfxEditor(page);
+                    let parameter = app.editor_parameters().next().unwrap();
+                    app.focus = Control::SfxParameter(parameter);
+                    let mut hits = HitMap::default();
+                    terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+                    let text: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    for expected in [
+                        "Tonal layer / MUTED",
+                        "this session",
+                        "Sine + sine FM",
+                        "Play tone",
+                        "Play mix",
+                    ] {
+                        assert!(
+                            text.contains(expected),
+                            "missing {expected:?} at {width}x{height}"
+                        );
+                    }
+                    for parameter in app.editor_parameters() {
+                        assert!(
+                            text.contains(parameter.label()),
+                            "missing label for {parameter:?}"
+                        );
+                    }
+                    match page {
+                        EditorPage::Mix => {
+                            for expected in [
+                                "20.0%",
+                                "1200 Hz",
+                                "4000 Hz",
+                                "1.25x",
+                                "2.00x",
+                                "Reset event",
+                            ] {
+                                assert!(text.contains(expected), "missing {expected:?}");
+                            }
+                        }
+                        EditorPage::Tone => {
+                            for expected in [
+                                "0.080",
+                                "1.50x",
+                                "auto 230-670 Hz",
+                                "0.12 ms",
+                                "0.35 ms",
+                                "Reset tone",
+                            ] {
+                                assert!(text.contains(expected), "missing {expected:?}");
+                            }
+                        }
+                        EditorPage::Sequence => {
+                            let recipe = app.edited_recipe();
+                            for step in shzx_sfx::SfxTonalStep::ALL {
+                                let ratio = recipe.tonal_pitch_ratio(step);
+                                let expected =
+                                    format!("{ratio:.2}x / {:.0}Hz", recipe.tonal_base_hz * ratio);
+                                assert!(text.contains(&expected), "missing {expected:?}");
+                            }
+                        }
+                    }
+                    for control in app.focus_order() {
+                        let hit = hits
+                            .region(control)
+                            .expect("editor focus has a visible mouse target");
+                        assert_eq!(hits.at(hit.x, hit.y), Some(control));
+                    }
+                    assert!(hits.region(Control::MuteLayer(SfxLayer::Tonal)).is_none());
+                    assert!(hits.region(Control::SelectEffect(app.effect)).is_none());
+                    for (index, hit) in hits.0.iter().enumerate() {
+                        assert_eq!(
+                            hit.area.intersection(Rect::new(0, 0, width, height)),
+                            hit.area
+                        );
+                        assert!(
+                            hits.0[index + 1..]
+                                .iter()
+                                .all(|other| !hit.area.intersects(other.area))
+                        );
+                    }
+                    app.overlay = Overlay::None;
+                }
             }
         }
     }
@@ -2087,7 +2407,7 @@ mod tests {
             for expected in [
                 "BUILD / error",
                 "Nominal",
-                "Play all",
+                "Play mix",
                 "Texture",
                 "intermodulation",
                 "FM",
