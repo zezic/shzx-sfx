@@ -1,0 +1,17 @@
+[
+  {"at_seconds":0.0,"command":{"type":"market","value":{"trend":"sideways","trend_strength":0.15,"volume":0.3,"volatility":0.15,"zoom":0.0,"activity":0.1}}},
+  {"at_seconds":1.0,"command":{"type":"trigger","value":{"kind":"hover-enter","pan":-0.6,"intensity":0.4}}},
+  {"at_seconds":2.0,"command":{"type":"trigger","value":{"kind":"click","pan":-0.6,"intensity":0.6}}},
+  {"at_seconds":4.0,"command":{"type":"market","value":{"trend":"bearish","trend_strength":0.8,"volume":0.7,"volatility":0.6,"zoom":0.2,"activity":0.4}}},
+  {"at_seconds":6.0,"command":{"type":"trigger","value":{"kind":"zoom-in","pan":0.2,"intensity":0.5}}},
+  {"at_seconds":6.0,"command":{"type":"market","value":{"trend":"bearish","trend_strength":0.8,"volume":0.7,"volatility":0.6,"zoom":0.95,"activity":0.65}}},
+  {"at_seconds":10.0,"command":{"type":"mode","value":"dialog"}},
+  {"at_seconds":10.0,"command":{"type":"trigger","value":{"kind":"dialog-open","pan":0.0,"intensity":0.6}}},
+  {"at_seconds":13.0,"command":{"type":"trigger","value":{"kind":"order-create","pan":0.2,"intensity":0.7}}},
+  {"at_seconds":15.0,"command":{"type":"mode","value":"browse"}},
+  {"at_seconds":15.0,"command":{"type":"market","value":{"trend":"bullish","trend_strength":0.7,"volume":0.8,"volatility":0.3,"zoom":0.4,"activity":0.4}}},
+  {"at_seconds":18.0,"command":{"type":"trigger","value":{"kind":"order-fill","pan":0.6,"intensity":0.7}}},
+  {"at_seconds":22.0,"command":{"type":"mode","value":"focus"}},
+  {"at_seconds":24.0,"command":{"type":"trigger","value":{"kind":"notification","pan":-0.5,"intensity":0.5}}},
+  {"at_seconds":26.0,"command":{"type":"mode","value":"browse"}}
+]

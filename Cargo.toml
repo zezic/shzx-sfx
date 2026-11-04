@@ -1,0 +1,29 @@
+[package]
+name = "shzx-sfx"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+description = "Procedural sci-fi soundscape and UI audio engine for Shizex"
+
+[features]
+default = ["playback", "tui"]
+playback = ["dep:cpal", "dep:crossbeam-queue"]
+tui = ["playback", "dep:ratatui"]
+
+[[bin]]
+name = "shzx-sfx"
+path = "src/bin/shzx-sfx.rs"
+
+[dependencies]
+arrayvec = "0.7"
+clap = { version = "4.6", features = ["derive"] }
+cpal = { version = "0.18", optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
+fastrand = "2"
+fundsp = { version = "0.20", default-features = false, features = ["std"] }
+hound = "3.5"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+strum = { version = "0.28", features = ["derive"] }
+thiserror = "2"
