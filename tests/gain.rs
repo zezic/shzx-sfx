@@ -41,6 +41,8 @@ fn renderer(mix: Mix) -> Renderer {
 fn default_ui_levels_are_audible_without_maximizing_the_mixer() {
     let mix = Mix {
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,
@@ -50,12 +52,12 @@ fn default_ui_levels_are_audible_without_maximizing_the_mixer() {
     // Listening references include the broad 3 kHz comfort cut; avoid makeup
     // gain that would restore the ear pressure the equalizer removes.
     for (kind, minimum_peak, minimum_rms) in [
-        (SfxKind::Click, 0.25, 0.035),
-        (SfxKind::Confirm, 0.22, 0.035),
-        (SfxKind::OrderFill, 0.30, 0.040),
+        (SfxKind::Click, 0.14, 0.020),
+        (SfxKind::Confirm, 0.12, 0.020),
+        (SfxKind::OrderFill, 0.17, 0.022),
     ] {
         let mut renderer = renderer(mix);
-        let mut warmup = vec![[0.0; 2]; SAMPLE_RATE as usize / 4];
+        let mut warmup = vec![[0.0; 2]; SAMPLE_RATE as usize * 5 / 4];
         renderer.render(&mut warmup);
         renderer.apply(Command::Trigger(SfxEvent::new(kind)));
         let duration = renderer.snapshot().last_event.unwrap().duration_seconds;
@@ -121,6 +123,8 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "texture",
             Mix {
                 drone: Unit::ZERO,
+                sub: Unit::ZERO,
+                transmission: Unit::ZERO,
                 harmony: Unit::ZERO,
                 melody: Unit::ZERO,
                 ..defaults
@@ -133,6 +137,8 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "harmony",
             Mix {
                 drone: Unit::ZERO,
+                sub: Unit::ZERO,
+                transmission: Unit::ZERO,
                 texture: Unit::ZERO,
                 melody: Unit::ZERO,
                 ..defaults
@@ -145,13 +151,15 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "melody",
             Mix {
                 drone: Unit::ZERO,
+                sub: Unit::ZERO,
+                transmission: Unit::ZERO,
                 texture: Unit::ZERO,
                 harmony: Unit::ZERO,
                 ..defaults
             },
-            7.2,
-            8.4,
-            0.012,
+            10.0,
+            12.0,
+            0.0006,
         ),
     ] {
         let mut renderer = renderer(mix);
@@ -181,6 +189,8 @@ fn ordinary_event_levels_follow_the_master_without_continuous_saturation() {
     let mix = Mix {
         master: Unit::new(0.2).unwrap(),
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,
@@ -214,6 +224,8 @@ fn ordinary_event_levels_follow_the_master_without_continuous_saturation() {
 fn every_default_effect_stays_inside_the_output_ceiling_after_boost() {
     let mix = Mix {
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,
@@ -222,7 +234,7 @@ fn every_default_effect_stays_inside_the_output_ceiling_after_boost() {
     let (loudest_kind, peak) = SfxKind::iter()
         .map(|kind| {
             let mut renderer = renderer(mix);
-            let mut warmup = vec![[0.0; 2]; SAMPLE_RATE as usize / 4];
+            let mut warmup = vec![[0.0; 2]; SAMPLE_RATE as usize * 5 / 4];
             renderer.render(&mut warmup);
             renderer.apply(Command::Trigger(SfxEvent::new(kind)));
             let duration = renderer.snapshot().last_event.unwrap().duration_seconds;
@@ -272,6 +284,8 @@ fn output_gain_is_an_independent_linear_boost_below_the_output_knee() {
         master: Unit::new(0.15).unwrap(),
         output_gain: neutral_gain,
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,

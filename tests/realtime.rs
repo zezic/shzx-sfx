@@ -5,10 +5,10 @@ use std::{
 };
 
 use shzx_sfx::{
-    Command, MarketContext, Mix, Mode, OutputGain, Pan, RenderConfig, Renderer, ReverbSettings,
-    SfxEdits, SfxEvent, SfxFilterBand, SfxFmIndex, SfxFmRatio, SfxKind, SfxLayer, SfxLayerEdits,
-    SfxLayerState, SfxMilliseconds, SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalRate,
-    SfxTonalSequence, SpatialMode, Symbol, Trend, Unit,
+    Command, DataTransmission, DataTransmissionCommand, MarketContext, Mix, Mode, OutputGain, Pan,
+    RenderConfig, Renderer, ReverbSettings, SfxEdits, SfxEvent, SfxFilterBand, SfxFmIndex,
+    SfxFmRatio, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerState, SfxMilliseconds, SfxScale,
+    SfxStepRate, SfxTonalEdits, SfxTonalRate, SfxTonalSequence, SpatialMode, Symbol, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -189,6 +189,9 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             }),
             Command::Spatial(SpatialMode::Pan),
             Command::Spatial(SpatialMode::Haas),
+            Command::DataTransmission(DataTransmissionCommand::Start(DataTransmission::default())),
+            Command::DataTransmission(DataTransmissionCommand::Pan(Pan::new(-0.8).unwrap())),
+            Command::DataTransmission(DataTransmissionCommand::End),
         ]);
         let mut block = [[0.0_f32; 2]; 64];
         let scope = AllocationScope::begin();
@@ -201,8 +204,21 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
                 black_box(renderer.snapshot());
             }
         }
-        // Let active voices retire, covering destruction as well as admission.
-        for _ in 0..(sample_rate as usize * 2).div_ceil(block.len()) {
+        // Exercise the sequencer's internal trigger path and pulse-budget expiry.
+        let transmission = DataTransmission {
+            max_triggers: shzx_sfx::TransmissionCount::new(2).unwrap(),
+            rate: shzx_sfx::TransmissionRate::new(80.0).unwrap(),
+            ..DataTransmission::default()
+        };
+        renderer.apply(Command::DataTransmission(DataTransmissionCommand::Start(
+            transmission,
+        )));
+        for _ in 0..(sample_rate as usize).div_ceil(block.len()) {
+            renderer.render(&mut block);
+        }
+        renderer.apply(Command::DataTransmission(DataTransmissionCommand::End));
+        // Include a full distant melody note and retirement of event voices.
+        for _ in 0..(sample_rate as usize * 20).div_ceil(block.len()) {
             renderer.render(&mut block);
         }
         black_box(&block);

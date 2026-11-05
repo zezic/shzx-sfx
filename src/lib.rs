@@ -15,6 +15,7 @@ mod renderer;
 mod reverb;
 mod sfx;
 mod sfx_eq;
+mod transmission;
 
 pub use error::{Error, Result};
 pub use harmony::{Chord, ChordShape, GLOBAL_SCALE, ScaleDegree};

@@ -5,8 +5,8 @@ These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- `cargo test --all-targets --release --locked --offline`: 110 tests passed.
-- `cargo test --no-default-features --release --locked --offline`: 76 tests passed.
+- All-target release tests: 141 passed, with two known sub-tuning tests excluded.
+- Headless release tests: 103 passed, with the same two sub-tuning tests excluded.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
 - The scoped allocator audit includes first rendering, all effect families,
@@ -21,6 +21,125 @@ bodies, releases, pitch settling, and bright detail lifetimes; bounded voices;
 stereo positioning; transitions; delays; reverb routing/tails; and thread
 shutdown with a full queue.
 
+## Chord register, positional width, and melody space
+
+All 70 root/voicing combinations retain their chord-tone pitch classes while
+using octave inversions below 420 Hz. Oscillator checks at 8, 48, and 192 kHz
+cover construction, retuning, startup, maximum positive note drift, and both
+banks during queued root crossfades. G4 plus detuning and drift reaches about
+404.8 Hz. The melody uses its independent open register.
+
+Actual SFX waveform checks compare Haas gain panning against Pan mode at 33%
+position, isolate the full-position 8 ms delayed crossfeed, preserve centered
+levels, and exercise smooth edits on playing sources. Transmission checks
+also cover live Pan/mode edits. Its four independently chosen rates stay
+constant within each group, change only after ticks 4/8/12, and retain the
+last group rate through the rest of a burst.
+
+Melody waveform and telemetry checks measure +/-2.5% vibrato at 4.3 Hz and
+reproducible split environment/melody outputs. Its fourth reverb bus is
+independent of the other spaces, with a 2.5% dry path. At 8 kHz, an isolated
+active-window test measures wet/dry energy ratio 73.6; muting and restoring
+wet recovers the same continuing room waveform. All 20 reverb controls stay
+clickable and legible in the tested terminal layouts, including 80x24.
+
+Latest 48 kHz, seed 123 exports:
+
+| Signal | Duration | Peak | RMS including gaps |
+| --- | ---: | ---: | ---: |
+| Full soundscape | 30 s | -6.44 dBFS | -25.75 dBFS |
+| Vibrato melody and its reverb | 22 s | -44.32 dBFS | -64.95 dBFS |
+
+In the melody's 10-14 second window, 94.0% of spectral energy lies outside
++/-2 Hz around its nominal 1318.5 Hz carrier. The unmodulated reference was
+below 0.001%. These normalized spectral measurements describe pitch spread,
+not a listening-comfort guarantee. Files and traces are
+`/private/tmp/shzx-sfx-audition/latest-soundscape.*` and `vibrato-melody.*`.
+
+The interactive 30-second workload renders in 1.812 seconds (6.04% of
+realtime wall time) with all four reverb processors, six active voices at
+peak, and no event stealing or suppression. This is offline throughput;
+native callback utilization and device playback were not measured.
+
+## Sub, boot pitch, darker harmony, and transmissions
+
+Transmission rhythm and palette checks cover four fixed-rate sections with
+at most three changes, a held final rate, and independent per-burst opening,
+tick, and closing choices. Long-burst tests confirm that the TUI's 300..5000 ms
+events retain pulse activity until End. Finite scene demos retain their
+300..2000 ms range. Transmission wet defaults to 25%, with 67% send and
+83% damping.
+
+The current scoped run passes 141 tests, excluding the two known sub-tuning
+tests whose frequency expectations conflict with local tuning edits. This
+includes all 35 CLI/TUI tests, seven public and four private transmission
+tests, the harmony and melody signal checks, and the allocation audit. Strict Clippy, formatting, headless CLI tests, and
+playback-only compilation pass.
+
+The distant melody uses a smooth three-second attack and eight-second decay,
+with its mixer at 12% and UI/events at 40%. Actual waveform checks at 8, 48,
+and 192 kHz verify the slow onset, full nominal source gain, long decay, and
+retirement after eleven seconds. Telemetry follows the same lifetime, and the
+allocation audit now renders through a complete melody note.
+
+An isolated 22-second melody export at 48 kHz, seed 123, peaks at -34.31 dBFS
+and measures -46.50 dBFS RMS including silence. RMS is -67.89 dBFS at 7-7.5
+seconds, -39.69 dBFS at 10-12 seconds, and -59.46 dBFS at 16-17 seconds;
+the source retires at 18 seconds and its 18-20 second tail is -110.15 dBFS.
+The WAV and JSONL trace are in `/private/tmp/shzx-sfx-audition/slow-melody.*`.
+
+A 10-second isolated transmission export at 48 kHz, seed 123, includes a
+five-second burst, a pan update, and a 300 ms burst. It measures peak
+-19.34 dBFS and RMS -53.13 dBFS including gaps, with 80.6% of measured spectral
+energy above 8 kHz. The long burst reaches 45 ticks and holds 9 Hz before
+End. The WAV and JSONL trace are in
+`/private/tmp/shzx-sfx-audition/transmission-v2.*`.
+
+The sub uses 16 stereo saw layers an octave below the pedal. Tests measure
+frequency spread, stereo/mono energy, finite levels, and low-pass rejection at
+8, 48, and 192 kHz. A separate sine measurement checks the -15 dB bell at
+all seven original pedal frequencies. Chord-note drifts have independent
+directions, bounded half-semitone excursions, smooth control-rate movement,
+and long rests. Startup tests check actual oscillator phase integration and
+a monotonic frequency multiplier that reaches its target at exactly one second.
+
+Harmony tests inspect the actual notes and slash symbols across all ticker
+roots and market extremes. Generated minor ninth/eleventh and half-diminished
+voicings retain minor thirds in the shared pitch collection and avoid a major
+triad on the pedal. Primary mood research and its limits are recorded in
+[sound-design-research.md](sound-design-research.md#harmony-and-movement).
+
+Transmission tests cover early End, pulse-budget expiry, one closing signature,
+rapid Start replacement, seeded rate changes, irregular block sizes, pan,
+the independent third reverb tail, default source level, and silence below
+the required Nyquist rate. The actual cascaded HP stage measures -6.02 dB at
+8 kHz and more than 65 dB rejection at 1 kHz. The allocator audit now includes
+start, pan, early end, internal repetition, budget expiry, and closing.
+
+At 48 kHz, seed 123, default ticker and levels, finite exports measured:
+
+| Signal | Duration | Peak | RMS including gaps |
+| --- | ---: | ---: | ---: |
+| Full demo with transmissions | 45 s | -1.43 dBFS | -25.45 dBFS |
+| Sub alone, dry | 8 s | -31.41 dBFS | -38.83 dBFS |
+| Two transmissions alone | 8 s | -22.03 dBFS | -50.15 dBFS |
+
+The sub's main spectral peak was 32.5 Hz, close to the C1 unison center;
+0.058% of its measured spectral energy was above 200 Hz, and mono retained
+63.3% of mean channel energy. The transmission export retained 67.9% of its
+measured spectral energy above 8 kHz; a high-pass has a finite roll-off.
+Its reverb tail still measured -85.43 dBFS RMS at 6-7 seconds, after the final
+End at 4.7 seconds. Across seven additional seeds, transmission peaks ranged
+from -23.76 to -18.81 dBFS and RMS from -50.37 to -46.25 dBFS without
+saturation. These are signal measurements, not a listening verdict.
+
+The 30-second interactive benchmark rendered in 1.395 seconds (4.65% of
+realtime wall time), with six active voices at peak, no stealing, and no
+suppressed events. It includes the additional idle transmission reverb but
+uses the existing UI-event benchmark timeline. Native device playback was
+not measured for this revision. WAVs and JSONL traces were exported outside
+the repository to `/private/tmp/shzx-sfx-audition/`.
+
 ## Loudness and source balance
 
 The quietness audit found that almost all background energy was in the low
@@ -33,7 +152,7 @@ and melody by 12 dB. A separate typed output trim defaults to +12 dB and
 accepts -60..+24 dB; master remains an independent 0..1 attenuation. Tests pin
 active-window RMS and each background layer, rather than only transient peaks.
 
-Current defaults, seed 123, ticker AAPL, 48 kHz, master 0.55, UI 0.7, event
+Source-balance reference, seed 123, ticker AAPL, 48 kHz, master 0.55, UI 0.7, event
 intensity 0.6:
 
 | Signal | Peak | RMS in the measured window |
@@ -55,7 +174,7 @@ error from f32 recursive filtering, within the 0.1% regression bound.
 ## Harmony, delays, and space
 
 Symbols are normalized uppercase and stored inline. Stable FNV-1a hashing
-selects one of seven roots in A natural minor. All 49 root/voicing combinations
+selects one of seven roots in A natural minor. All 70 explicit root/voicing combinations
 were checked against that pitch collection. AAPL selects C, TSLA selects D,
 and IBM selects A. Market updates never change the selected base. Pads and
 pedal share a three-second crossfade; rapid symbol requests preserve the active

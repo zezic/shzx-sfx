@@ -1,6 +1,6 @@
 use shzx_sfx::{
     Candle, Chord, ChordShape, Command, MarketContext, Mix, Mode, Pan, RenderConfig, Renderer,
-    SfxEvent, SfxKind, SpatialMode, Symbol, Trend, Unit,
+    SfxEvent, SfxKind, SpatialMode, Symbol, TransmissionCount, TransmissionRate, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -39,6 +39,14 @@ fn external_numeric_and_serialized_inputs_preserve_their_domains() {
     assert!(Pan::new(1.0).is_ok());
     assert!(serde_json::from_str::<Unit>("1.01").is_err());
     assert!(serde_json::from_str::<Pan>("-1.01").is_err());
+    for invalid in [0, TransmissionCount::MAX + 1] {
+        assert!(TransmissionCount::new(invalid).is_err());
+        assert!(serde_json::from_str::<TransmissionCount>(&invalid.to_string()).is_err());
+    }
+    for invalid in [f32::NAN, f32::INFINITY, 0.0, 1.99, 80.01] {
+        assert!(TransmissionRate::new(invalid).is_err());
+    }
+    assert!(serde_json::from_str::<TransmissionRate>("81").is_err());
     assert!(serde_json::from_str::<Mix>(r#"{"unexpected":0.5}"#).is_err());
     assert!(
         serde_json::from_str::<Command>(
@@ -75,6 +83,25 @@ fn external_numeric_and_serialized_inputs_preserve_their_domains() {
         },
     ] {
         assert!(Renderer::new(invalid).is_err());
+    }
+}
+
+#[test]
+fn startup_pitch_glides_smoothly_to_the_target_in_exactly_one_second() {
+    for sample_rate in [8_000, 44_100, 48_000, 192_000] {
+        let mut renderer = Renderer::new(config(sample_rate)).unwrap();
+        assert_eq!(renderer.snapshot().startup_pitch, Unit::ZERO);
+        let mut previous = 0.0;
+        for frame in 0..=sample_rate {
+            let progress = frame as f32 / sample_rate as f32;
+            let actual = renderer.snapshot().startup_pitch.get();
+            let expected = progress * progress * (3.0 - 2.0 * progress);
+            assert!((actual - expected).abs() < 0.000001);
+            assert!(actual >= previous);
+            previous = actual;
+            assert!(renderer.next_frame().into_iter().all(f32::is_finite));
+        }
+        assert_eq!(renderer.snapshot().startup_pitch, Unit::ONE);
     }
 }
 
@@ -168,7 +195,7 @@ fn sample_timeline_and_seed_are_reproducible_across_irregular_blocks() {
     assert_eq!(a.chord, b.chord);
     assert_ne!(
         a.chord,
-        Chord::new(Symbol::default().root(), ChordShape::Sus2)
+        Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
     );
     assert_eq!(a.last_event, b.last_event);
 
@@ -189,6 +216,8 @@ fn bursts_and_live_parameter_changes_stay_finite_and_bounded() {
     renderer.apply(Command::Mix(Mix {
         master: Unit::ONE,
         drone: Unit::ONE,
+        sub: Unit::ONE,
+        transmission: Unit::ONE,
         texture: Unit::ONE,
         harmony: Unit::ONE,
         melody: Unit::ONE,
@@ -272,6 +301,8 @@ fn deep_zoom_darkens_the_noise_texture_after_smoothing() {
     let mix = Mix {
         master: Unit::ONE,
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ONE,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,
@@ -322,6 +353,8 @@ fn dialog_focus_changes_the_environment_but_keeps_ui_effects_audible() {
     let mix = Mix {
         master: Unit::ONE,
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
+        transmission: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,

@@ -520,10 +520,12 @@ pub struct Mix {
     pub master: Unit,
     pub output_gain: OutputGain,
     pub drone: Unit,
+    pub sub: Unit,
     pub texture: Unit,
     pub harmony: Unit,
     pub melody: Unit,
     pub ui: Unit,
+    pub transmission: Unit,
     pub reverb: Unit,
 }
 
@@ -533,10 +535,12 @@ impl Default for Mix {
             master: Unit(0.55),
             output_gain: OutputGain::default(),
             drone: Unit(0.65),
+            sub: Unit(0.35),
             texture: Unit(0.45),
             harmony: Unit(0.55),
-            melody: Unit(0.28),
-            ui: Unit(0.7),
+            melody: Unit(0.08),
+            ui: Unit(0.40),
+            transmission: Unit(0.22),
             reverb: Unit(0.5),
         }
     }
@@ -559,6 +563,8 @@ pub struct ReverbParameters {
 pub struct ReverbSettings {
     pub environment: ReverbParameters,
     pub events: ReverbParameters,
+    pub transmission: ReverbParameters,
+    pub melody: ReverbParameters,
 }
 
 impl Default for ReverbSettings {
@@ -577,6 +583,20 @@ impl Default for ReverbSettings {
                 damping: Unit(0.55),
                 width: Unit(0.95),
                 wet: Unit(0.32),
+            },
+            transmission: ReverbParameters {
+                send: Unit(0.67),
+                room_size: Unit(0.78),
+                damping: Unit(0.83),
+                width: Unit(0.75),
+                wet: Unit(0.25),
+            },
+            melody: ReverbParameters {
+                send: Unit(0.95),
+                room_size: Unit(0.88),
+                damping: Unit(0.68),
+                width: Unit(0.92),
+                wet: Unit(0.85),
             },
         }
     }
@@ -1268,6 +1288,156 @@ pub enum Command {
     Reverb(ReverbSettings),
     Spatial(SpatialMode),
     Trigger(SfxEvent),
+    DataTransmission(DataTransmissionCommand),
+}
+
+/// Maximum number of short pulses between the opening and closing signatures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub struct TransmissionCount(u16);
+
+impl TransmissionCount {
+    pub const MAX: u16 = 256;
+
+    pub fn new(value: u16) -> Result<Self> {
+        if (1..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "transmission trigger count",
+                value: f64::from(value),
+                expected: "1..=256 triggers",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl Default for TransmissionCount {
+    fn default() -> Self {
+        Self(24)
+    }
+}
+
+impl TryFrom<u16> for TransmissionCount {
+    type Error = Error;
+
+    fn try_from(value: u16) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<TransmissionCount> for u16 {
+    fn from(value: TransmissionCount) -> Self {
+        value.get()
+    }
+}
+
+/// Nominal pulse rate for the transmission's fixed-rate sections.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct TransmissionRate(f32);
+
+impl TransmissionRate {
+    pub const MIN_HZ: f32 = 2.0;
+    pub const MAX_HZ: f32 = 80.0;
+
+    pub fn new(value: f32) -> Result<Self> {
+        if value.is_finite() && (Self::MIN_HZ..=Self::MAX_HZ).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParameter {
+                name: "transmission rate",
+                value: f64::from(value),
+                expected: "a finite rate in 2..=80 Hz",
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for TransmissionRate {
+    fn default() -> Self {
+        Self(10.0)
+    }
+}
+
+impl TryFrom<f32> for TransmissionRate {
+    type Error = Error;
+
+    fn try_from(value: f32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<TransmissionRate> for f32 {
+    fn from(value: TransmissionRate) -> Self {
+        value.get()
+    }
+}
+
+/// One externally delimited transmission, with a bounded pulse budget.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DataTransmission {
+    pub pan: Pan,
+    pub intensity: Unit,
+    pub max_triggers: TransmissionCount,
+    pub rate: TransmissionRate,
+}
+
+impl Default for DataTransmission {
+    fn default() -> Self {
+        Self {
+            pan: Pan::CENTER,
+            intensity: Unit(0.5),
+            max_triggers: TransmissionCount::default(),
+            rate: TransmissionRate::default(),
+        }
+    }
+}
+
+/// Start replaces the current sequence; End closes it once and retains FX tails.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "kebab-case",
+    deny_unknown_fields
+)]
+pub enum DataTransmissionCommand {
+    Start(DataTransmission),
+    Pan(Pan),
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransmissionPhase {
+    Idle,
+    Opening,
+    Repeating,
+    AwaitingEnd,
+    Closing,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct TransmissionSnapshot {
+    pub phase: TransmissionPhase,
+    pub repeated: u16,
+    pub max_triggers: TransmissionCount,
+    pub pan: Pan,
+    pub rate_hz: f32,
+    pub active_voices: usize,
+    pub generated_events: u64,
 }
 
 #[derive(Clone, Copy, Debug)]

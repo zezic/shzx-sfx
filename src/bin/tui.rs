@@ -16,9 +16,9 @@ use ratatui::crossterm::{
     terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
 use shzx_sfx::{
-    AudioEngine, AudioStatus, CallbackStats, Command, MarketContext, Mix, Mode, OutputGain,
-    OutputInfo, Pan, RenderConfig, ReverbSettings, SfxEvent, SfxKind, Snapshot, SpatialMode,
-    Symbol, Trend, Unit,
+    AudioEngine, AudioStatus, CallbackStats, Command, DataTransmissionCommand, MarketContext, Mix,
+    Mode, OutputGain, OutputInfo, Pan, RenderConfig, ReverbSettings, SfxEvent, SfxKind, Snapshot,
+    SpatialMode, Symbol, Trend, Unit,
 };
 use shzx_sfx::{
     SfxEdits, SfxFilterBand, SfxFmIndex, SfxFmRatio, SfxLayer, SfxLayerSelection, SfxLayerState,
@@ -27,7 +27,7 @@ use shzx_sfx::{
 };
 use strum::IntoEnumIterator;
 
-use super::{CliResult, MixLayer, ReverbBus, ReverbField, invalid};
+use super::{CliResult, MixLayer, ReverbBus, ReverbField, TransmissionDemoBurst, invalid};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -361,6 +361,7 @@ impl App {
                     Command::Reverb(reverb) => self.reverb = reverb,
                     Command::Spatial(spatial) => self.spatial = spatial,
                     Command::Trigger(event) => self.effect = event.kind,
+                    Command::DataTransmission(_) => {}
                 }
                 self.notice = match command {
                     Command::Trigger(event) => format!(
@@ -387,6 +388,7 @@ impl App {
                         "Reverb updated. The existing tail continues through the transition.".into()
                     }
                     Command::Spatial(spatial) => format!("Spatial processing: {spatial}"),
+                    Command::DataTransmission(_) => "Data transmission updated.".into(),
                 };
                 true
             }
@@ -1252,21 +1254,86 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub(super) fn run(mut engine: AudioEngine, config: RenderConfig) -> CliResult<()> {
-    let result = control_panel(&mut engine, config);
+#[derive(Clone, Copy)]
+enum TransmissionDemoStep {
+    Waiting(TransmissionDemoBurst),
+    Started { end: Duration },
+}
+
+struct LiveTransmissionDemo<I> {
+    schedule: I,
+    step: Option<TransmissionDemoStep>,
+}
+
+impl<I: Iterator<Item = TransmissionDemoBurst>> LiveTransmissionDemo<I> {
+    fn new(mut schedule: I) -> Self {
+        let step = Self::next_burst(&mut schedule);
+        Self { schedule, step }
+    }
+
+    fn next_burst(schedule: &mut I) -> Option<TransmissionDemoStep> {
+        schedule.next().map(TransmissionDemoStep::Waiting)
+    }
+
+    fn advance(
+        &mut self,
+        elapsed: Duration,
+        send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
+    ) -> shzx_sfx::Result<()> {
+        while let Some(step) = self.step {
+            match step {
+                // Skip unsent bursts that expired while the host was suspended.
+                TransmissionDemoStep::Waiting(burst)
+                    if Duration::from_secs_f64(burst.end_seconds) <= elapsed =>
+                {
+                    self.step = Self::next_burst(&mut self.schedule);
+                }
+                TransmissionDemoStep::Waiting(burst)
+                    if Duration::from_secs_f64(burst.start_seconds) <= elapsed =>
+                {
+                    send(Command::DataTransmission(DataTransmissionCommand::Start(
+                        burst.settings,
+                    )))?;
+                    self.step = Some(TransmissionDemoStep::Started {
+                        end: Duration::from_secs_f64(burst.end_seconds),
+                    });
+                }
+                TransmissionDemoStep::Started { end } if end <= elapsed => {
+                    send(Command::DataTransmission(DataTransmissionCommand::End))?;
+                    self.step = Self::next_burst(&mut self.schedule);
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn run(
+    mut engine: AudioEngine,
+    config: RenderConfig,
+    demo: Option<impl Iterator<Item = TransmissionDemoBurst>>,
+) -> CliResult<()> {
+    let result = control_panel(&mut engine, config, demo);
     let stopped = engine.shutdown();
     result?;
     stopped?;
     Ok(())
 }
 
-fn control_panel(engine: &mut AudioEngine, config: RenderConfig) -> CliResult<()> {
+fn control_panel(
+    engine: &mut AudioEngine,
+    config: RenderConfig,
+    demo: Option<impl Iterator<Item = TransmissionDemoBurst>>,
+) -> CliResult<()> {
     let _guard = TerminalGuard;
     let mut terminal = ratatui::try_init()?;
     execute!(io::stdout(), EnableMouseCapture)?;
     let handle = engine.handle();
     let mut send = |command| handle.send(command);
     let mut app = App::new(config, engine.output_info().clone());
+    let mut demo = demo.map(LiveTransmissionDemo::new);
+    let started = Instant::now();
     let mut dragging = None;
     let mut hits = view::HitMap::default();
     let mut next_frame = Instant::now();
@@ -1285,6 +1352,11 @@ fn control_panel(engine: &mut AudioEngine, config: RenderConfig) -> CliResult<()
             }
             if app.status != AudioStatus::Running {
                 return Err(invalid(format!("audio output stopped: {:?}", app.status)).into());
+            }
+            if let Some(demo) = &mut demo
+                && let Err(error) = demo.advance(started.elapsed(), &mut send)
+            {
+                app.notice = format!("Transmission demo pending: {error}");
             }
             terminal.draw(|frame| {
                 hits = view::draw(frame, &app);

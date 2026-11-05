@@ -3,19 +3,22 @@ use serde::Serialize;
 use crate::{
     BackgroundSnapshot, Chord, ClockState, Command, GeneratedEvent, HarmonySnapshot, MarketContext,
     Mix, Mode, ParameterSnapshot, RenderConfig, Result, ReverbParameters, ReverbSettings,
-    SpatialMode, Symbol, Unit,
+    SpatialMode, Symbol, TransmissionSnapshot, Unit,
     background::Background,
     dsp::{HighPass, LowPass, Smooth, limit_stereo},
     harmony::Harmony,
     reverb::SpaceReverb,
     sfx::SfxBank,
     sfx_eq::SfxEqFilter,
+    transmission::Transmission,
 };
 
 // Calibrate source buses before the user-controlled master. Layer controls
 // remain linear 0..1, with normal listening levels near their default positions.
 const ENVIRONMENT_GAIN: f32 = 4.0;
 const EVENT_GAIN: f32 = 16.0;
+const TRANSMISSION_GAIN: f32 = 256.0;
+const MELODY_DRY_GAIN: f32 = 0.025;
 
 /// A cheap copy of the current synthesis state. Levels are post-master linear
 /// peak and RMS since startup; event parameters describe the last admitted voice.
@@ -27,6 +30,9 @@ pub struct Snapshot {
     pub seed: u64,
     pub market: MarketContext,
     pub background: BackgroundSnapshot,
+    pub transmission: TransmissionSnapshot,
+    /// Frequency multiplier of the one-second startup glide.
+    pub startup_pitch: Unit,
     pub mode: Mode,
     pub mix: Mix,
     pub output_gain_db: f32,
@@ -55,22 +61,25 @@ pub struct Renderer {
     background: Background,
     sfx: SfxBank,
     sfx_eq: [SfxEqFilter; 2],
+    transmission: Transmission,
     harmony: Harmony,
     market: MarketContext,
     market_smoothers: [Smooth; 5],
     mode: Mode,
     focus: Smooth,
     mix: Mix,
-    mix_smoothers: [Smooth; 6],
+    mix_smoothers: [Smooth; 8],
     current_mix: Mix,
     master: Smooth,
     output_gain: Smooth,
     reverb: ReverbSettings,
-    reverb_smoothers: [Smooth; 10],
+    reverb_smoothers: [ReverbSmoothers; 4],
     current_reverb: ReverbSettings,
     spatial: SpatialMode,
     environment_reverb: SpaceReverb,
     ui_reverb: SpaceReverb,
+    transmission_reverb: SpaceReverb,
+    melody_reverb: SpaceReverb,
     lowpass: [LowPass; 2],
     highpass: [HighPass; 2],
     wet_lowpass: [LowPass; 2],
@@ -88,18 +97,10 @@ impl Renderer {
         let rate = config.sample_rate as f32;
         let control_rate = rate / 64.0;
         let market = MarketContext::default();
-        let mut environment_reverb = SpaceReverb::new(config.sample_rate);
-        configure_reverb(
-            &mut environment_reverb,
-            config.reverb.environment.room_size.get(),
-            config.reverb.environment,
-        );
-        let mut ui_reverb = SpaceReverb::new(config.sample_rate);
-        configure_reverb(
-            &mut ui_reverb,
-            config.reverb.events.room_size.get(),
-            config.reverb.events,
-        );
+        let environment_reverb = new_reverb(config.sample_rate, config.reverb.environment);
+        let ui_reverb = new_reverb(config.sample_rate, config.reverb.events);
+        let transmission_reverb = new_reverb(config.sample_rate, config.reverb.transmission);
+        let melody_reverb = new_reverb(config.sample_rate, config.reverb.melody);
         let mut master = Smooth::new(0.0, 0.025, rate);
         master.target(config.mix.master.get());
         let harmony = Harmony::new(config.sample_rate, config.symbol.root());
@@ -115,6 +116,11 @@ impl Renderer {
                 config.spatial,
             ),
             sfx_eq: std::array::from_fn(|_| SfxEqFilter::new(config.sample_rate)),
+            transmission: Transmission::new(
+                config.sample_rate,
+                config.seed ^ 0x4441_5441,
+                config.spatial,
+            ),
             harmony,
             market,
             market_smoothers: market_values(market).map(|v| Smooth::new(v, 0.4, control_rate)),
@@ -126,12 +132,14 @@ impl Renderer {
             master,
             output_gain: Smooth::new(config.mix.output_gain.amplitude(), 0.025, rate),
             reverb: config.reverb,
-            reverb_smoothers: reverb_values(config.reverb)
-                .map(|v| Smooth::new(v, 0.12, control_rate)),
+            reverb_smoothers: reverb_buses(config.reverb)
+                .map(|parameters| ReverbSmoothers::new(parameters, control_rate)),
             current_reverb: config.reverb,
             spatial: config.spatial,
             environment_reverb,
             ui_reverb,
+            transmission_reverb,
+            melody_reverb,
             lowpass: std::array::from_fn(|_| LowPass::new(rate, 1400.0)),
             highpass: std::array::from_fn(|_| HighPass::new(rate, 32.0)),
             wet_lowpass: std::array::from_fn(|_| LowPass::new(rate, 1800.0)),
@@ -173,10 +181,7 @@ impl Renderer {
             }
             Command::Reverb(settings) => {
                 self.reverb = settings;
-                for (smooth, target) in self
-                    .reverb_smoothers
-                    .iter_mut()
-                    .zip(reverb_values(settings))
+                for (smooth, target) in self.reverb_smoothers.iter_mut().zip(reverb_buses(settings))
                 {
                     smooth.target(target);
                 }
@@ -184,12 +189,14 @@ impl Renderer {
             Command::Spatial(spatial) => {
                 self.spatial = spatial;
                 self.sfx.set_spatial(spatial);
+                self.transmission.set_spatial(spatial);
             }
             Command::Trigger(event) => {
                 if let Some(generated) = self.sfx.trigger(event) {
                     self.last_event = Some(generated);
                 }
             }
+            Command::DataTransmission(command) => self.transmission.apply(command),
         }
     }
 
@@ -210,10 +217,15 @@ impl Renderer {
         {
             self.background.chord(self.harmony.chord);
         }
-        self.background
-            .control(self.sample, market, focus, self.harmony.chord);
-        let reverb_values = std::array::from_fn(|i| self.reverb_smoothers[i].tick());
-        self.current_reverb = reverb_from_values(reverb_values);
+        self.background.control(self.sample, market, focus);
+        let [environment, events, transmission, melody] =
+            self.reverb_smoothers.each_mut().map(|bus| bus.tick());
+        self.current_reverb = ReverbSettings {
+            environment,
+            events,
+            transmission,
+            melody,
+        };
         let parameters = environment_parameters(
             market.zoom.get(),
             focus,
@@ -242,7 +254,15 @@ impl Renderer {
             self.current_reverb.events.room_size.get(),
             events,
         );
-        let levels: [f32; 6] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
+        configure_reverb(
+            &mut self.transmission_reverb,
+            self.current_reverb.transmission.room_size.get(),
+            self.current_reverb.transmission,
+        );
+        let mut melody = self.current_reverb.melody;
+        melody.width = Unit::clamped(melody.width.get() * width_scale);
+        configure_reverb(&mut self.melody_reverb, melody.room_size.get(), melody);
+        let levels: [f32; 8] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
         self.current_mix = Mix {
             master: self.mix.master,
             output_gain: self.mix.output_gain,
@@ -252,6 +272,8 @@ impl Renderer {
             melody: Unit::clamped(levels[3]),
             ui: Unit::clamped(levels[4]),
             reverb: Unit::clamped(levels[5]),
+            sub: Unit::clamped(levels[6]),
+            transmission: Unit::clamped(levels[7]),
         };
     }
 
@@ -268,8 +290,12 @@ impl Renderer {
         if self.sample.is_multiple_of(64) {
             self.control();
         }
-        let background = self.background.tick(self.current_mix);
-        let raw_ui = self.sfx.tick();
+        let pitch_ratio = self.startup_pitch();
+        let background = self.background.tick(self.current_mix, pitch_ratio);
+        let melody = background.melody;
+        let background = background.environment;
+        let raw_ui = self.sfx.tick_scaled(pitch_ratio);
+        let transmission = self.transmission.tick(pitch_ratio);
         let ui =
             std::array::from_fn::<_, 2, _>(|channel| self.sfx_eq[channel].tick(raw_ui[channel]));
         let focus = self.focus.value();
@@ -279,17 +305,34 @@ impl Renderer {
             .environment_reverb
             .tick((background[0] * bg_send, background[1] * bg_send));
         let ui_wet = self.ui_reverb.tick((ui[0] * ui_send, ui[1] * ui_send));
+        let transmission_send = self.current_reverb.transmission.send.get();
+        let transmission_wet = self.transmission_reverb.tick((
+            transmission[0] * transmission_send,
+            transmission[1] * transmission_send,
+        ));
+        let melody_send = self.current_reverb.melody.send.get();
+        let melody_wet = self
+            .melody_reverb
+            .tick((melody[0] * melody_send, melody[1] * melody_send));
         let wet = self.current_mix.reverb.get();
         let master = self.master.tick() * self.output_gain.tick();
         let bg_wet = [bg_wet.0, bg_wet.1];
         let ui_wet = [ui_wet.0, ui_wet.1];
+        let transmission_wet = [transmission_wet.0, transmission_wet.1];
+        let melody_wet = [melody_wet.0, melody_wet.1];
         let frame = std::array::from_fn(|i| {
             let distant = background[i] * (0.9 - focus * 0.65 - self.zoom_amount * 0.2)
-                + bg_wet[i] * wet * (0.5 + focus * 2.0 + self.zoom_amount * 0.35);
+                + bg_wet[i] * wet * (0.5 + focus * 2.0 + self.zoom_amount * 0.35)
+                + melody[i] * MELODY_DRY_GAIN
+                + melody_wet[i] * wet;
             let bg = self.lowpass[i].tick(self.highpass[i].tick(distant));
             let effect =
                 (ui[i] + self.wet_lowpass[i].tick(ui_wet[i]) * wet) * self.current_mix.ui.get();
-            self.output_highpass[i].tick((bg * ENVIRONMENT_GAIN + effect * EVENT_GAIN) * master)
+            let data = (transmission[i] * 0.08 + transmission_wet[i] * wet)
+                * self.current_mix.transmission.get();
+            self.output_highpass[i].tick(
+                (bg * ENVIRONMENT_GAIN + effect * EVENT_GAIN + data * TRANSMISSION_GAIN) * master,
+            )
         });
         let out = limit_stereo(frame);
         for value in out {
@@ -309,6 +352,8 @@ impl Renderer {
             seed: self.config.seed,
             market: self.market,
             background: self.background_snapshot(),
+            transmission: self.transmission.snapshot(),
+            startup_pitch: Unit::clamped(self.startup_pitch()),
             mode: self.mode,
             mix: self.mix,
             output_gain_db: 20.0 * self.output_gain.value().log10(),
@@ -330,6 +375,14 @@ impl Renderer {
                 (self.sum_squares / (self.sample as f64 * 2.0)).sqrt() as f32
             },
         }
+    }
+
+    fn startup_pitch(&self) -> f32 {
+        if self.sample >= u64::from(self.config.sample_rate) {
+            return 1.0;
+        }
+        let progress = self.sample as f64 / f64::from(self.config.sample_rate);
+        (progress * progress * (3.0 - 2.0 * progress)) as f32
     }
 
     fn background_snapshot(&self) -> BackgroundSnapshot {
@@ -413,40 +466,54 @@ fn configure_reverb(reverb: &mut SpaceReverb, room: f32, parameters: ReverbParam
     reverb.set_wet(parameters.wet.get());
 }
 
-fn reverb_values(settings: ReverbSettings) -> [f32; 10] {
-    let a = settings.environment;
-    let b = settings.events;
+fn new_reverb(sample_rate: u32, parameters: ReverbParameters) -> SpaceReverb {
+    let mut reverb = SpaceReverb::new(sample_rate);
+    configure_reverb(&mut reverb, parameters.room_size.get(), parameters);
+    reverb
+}
+
+fn reverb_buses(settings: ReverbSettings) -> [ReverbParameters; 4] {
     [
-        a.room_size.get(),
-        a.damping.get(),
-        a.width.get(),
-        a.wet.get(),
-        a.send.get(),
-        b.room_size.get(),
-        b.damping.get(),
-        b.width.get(),
-        b.wet.get(),
-        b.send.get(),
+        settings.environment,
+        settings.events,
+        settings.transmission,
+        settings.melody,
     ]
 }
 
-fn reverb_from_values(values: [f32; 10]) -> ReverbSettings {
-    let [a, b, c, d, e, f, g, h, i, j] = values.map(Unit::clamped);
-    ReverbSettings {
-        environment: ReverbParameters {
-            room_size: a,
-            damping: b,
-            width: c,
-            wet: d,
-            send: e,
-        },
-        events: ReverbParameters {
-            room_size: f,
-            damping: g,
-            width: h,
-            wet: i,
-            send: j,
-        },
+struct ReverbSmoothers([Smooth; 5]);
+
+impl ReverbSmoothers {
+    fn values(parameters: ReverbParameters) -> [f32; 5] {
+        [
+            parameters.room_size.get(),
+            parameters.damping.get(),
+            parameters.width.get(),
+            parameters.wet.get(),
+            parameters.send.get(),
+        ]
+    }
+
+    fn new(parameters: ReverbParameters, rate: f32) -> Self {
+        Self(Self::values(parameters).map(|value| Smooth::new(value, 0.12, rate)))
+    }
+
+    fn target(&mut self, parameters: ReverbParameters) {
+        for (smoother, value) in self.0.iter_mut().zip(Self::values(parameters)) {
+            smoother.target(value);
+        }
+    }
+
+    fn tick(&mut self) -> ReverbParameters {
+        let [room_size, damping, width, wet, send] =
+            self.0.each_mut().map(|value| Unit::clamped(value.tick()));
+        ReverbParameters {
+            room_size,
+            damping,
+            width,
+            wet,
+            send,
+        }
     }
 }
 
@@ -468,7 +535,7 @@ fn market_values(market: MarketContext) -> [f32; 5] {
     ]
 }
 
-fn mix_values(mix: Mix) -> [f32; 6] {
+fn mix_values(mix: Mix) -> [f32; 8] {
     [
         mix.drone.get(),
         mix.texture.get(),
@@ -476,6 +543,8 @@ fn mix_values(mix: Mix) -> [f32; 6] {
         mix.melody.get(),
         mix.ui.get(),
         mix.reverb.get(),
+        mix.sub.get(),
+        mix.transmission.get(),
     ]
 }
 

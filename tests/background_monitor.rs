@@ -75,7 +75,7 @@ fn pending_harmony_uses_live_context_and_crossfade_progress_tracks_rendering() {
     let mut renderer = renderer();
     assert_eq!(
         renderer.snapshot().background.harmony.next,
-        Chord::new(Symbol::default().root(), ChordShape::Sus2)
+        Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
     );
     renderer.apply(Command::Market(MarketContext {
         trend: Trend::Bullish,
@@ -88,11 +88,11 @@ fn pending_harmony_uses_live_context_and_crossfade_progress_tracks_rendering() {
     let pending = renderer.snapshot();
     assert_eq!(
         pending.chord,
-        Chord::new(Symbol::default().root(), ChordShape::Sus2)
+        Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
     );
     assert_eq!(
         pending.background.harmony.next,
-        Chord::new(Symbol::default().root(), ChordShape::Add9)
+        Chord::new(Symbol::default().root(), ChordShape::MinorEleventh)
     );
     assert!(scheduled_seconds(pending.background.harmony.clock) > 9.0);
 
@@ -105,8 +105,14 @@ fn pending_harmony_uses_live_context_and_crossfade_progress_tracks_rendering() {
             progress,
             remaining_seconds,
         } => {
-            assert_eq!(from, Chord::new(Symbol::default().root(), ChordShape::Sus2));
-            assert_eq!(to, Chord::new(Symbol::default().root(), ChordShape::Add9));
+            assert_eq!(
+                from,
+                Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
+            );
+            assert_eq!(
+                to,
+                Chord::new(Symbol::default().root(), ChordShape::MinorEleventh)
+            );
             (progress.get(), remaining_seconds)
         }
         ChordTransition::Steady { .. } => panic!("the musical decision should start a crossfade"),
@@ -128,7 +134,7 @@ fn pending_harmony_uses_live_context_and_crossfade_progress_tracks_rendering() {
     assert_eq!(
         renderer.snapshot().background.harmony.transition,
         ChordTransition::Steady {
-            chord: Chord::new(Symbol::default().root(), ChordShape::Add9)
+            chord: Chord::new(Symbol::default().root(), ChordShape::MinorEleventh)
         }
     );
 }
@@ -141,7 +147,7 @@ fn focus_explains_held_harmony_and_melody_clocks_without_losing_their_schedule()
     let held = renderer.snapshot();
     assert_eq!(
         held.chord,
-        Chord::new(Symbol::default().root(), ChordShape::Sus2)
+        Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
     );
     assert!(matches!(held.background.harmony.clock,
         ClockState::Held { recheck_in_seconds } if recheck_in_seconds > 0.0));
@@ -159,7 +165,7 @@ fn focus_explains_held_harmony_and_melody_clocks_without_losing_their_schedule()
     assert!(scheduled_seconds(resumed.background.melody.clock) > 0.0);
     assert_eq!(
         resumed.chord,
-        Chord::new(Symbol::default().root(), ChordShape::Sus2)
+        Chord::new(Symbol::default().root(), ChordShape::MinorNinth)
     );
 }
 
@@ -193,11 +199,40 @@ fn autonomous_details_and_melody_report_source_activity_and_upcoming_events() {
     assert!(scheduled_seconds(melodic.clock) > 10.0);
     assert!(
         matches!(melodic.voice, BackgroundVoice::Playing { frequency_hz, remaining_seconds }
-        if frequency_hz > 0.0 && (2.5..2.6).contains(&remaining_seconds))
+        if frequency_hz > 0.0 && (10.9..11.0).contains(&remaining_seconds))
     );
     advance(&mut renderer, (RATE as f32 * 2.7) as usize);
     let tail = renderer.snapshot().background.melody;
     assert_eq!(tail.generated, 1);
-    assert_eq!(tail.voice, BackgroundVoice::Silent);
-    assert!(scheduled_seconds(tail.clock) > 0.0);
+    assert!(
+        matches!(tail.voice, BackgroundVoice::Playing { remaining_seconds, .. }
+        if (8.2..8.3).contains(&remaining_seconds))
+    );
+    advance(
+        &mut renderer,
+        RATE as usize * 11 - 64 - (RATE as f32 * 2.7) as usize,
+    );
+    let retired = renderer.snapshot().background.melody;
+    assert_eq!(retired.generated, 1);
+    assert_eq!(retired.voice, BackgroundVoice::Silent);
+    assert!(scheduled_seconds(retired.clock) > 0.0);
+}
+
+#[test]
+fn melody_monitor_reports_its_current_vibrato_pitch() {
+    let mut renderer = renderer();
+    advance(&mut renderer, RATE as usize * 7 + 1);
+    let frequency = |renderer: &Renderer| match renderer.snapshot().background.melody.voice {
+        BackgroundVoice::Playing { frequency_hz, .. } => frequency_hz,
+        BackgroundVoice::Silent => panic!("the melody should still be playing"),
+    };
+    let onset = frequency(&renderer);
+    let quarter_cycle = (RATE as f32 / (4.3 * 4.0)).round() as usize;
+    advance(&mut renderer, quarter_cycle - 1);
+    let upper = frequency(&renderer);
+    advance(&mut renderer, quarter_cycle * 2);
+    let lower = frequency(&renderer);
+    assert!((1.024..1.026).contains(&(upper / onset)));
+    assert!((0.974..0.976).contains(&(lower / onset)));
+    assert_eq!(renderer.snapshot().background.melody.generated, 1);
 }

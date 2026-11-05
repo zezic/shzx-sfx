@@ -53,18 +53,26 @@ fn symbols_are_inline_normalized_validated_and_map_stably_to_scale_roots() {
 }
 
 #[test]
-fn every_root_and_voicing_stays_in_the_same_global_pitch_collection() {
+fn every_root_and_voicing_stays_in_the_shared_collection_below_420_hz() {
     let allowed_pitch_classes = [0, 2, 4, 5, 7, 9, 11];
     for root in ScaleDegree::ALL {
         assert!(allowed_pitch_classes.contains(&(root.pedal_note() % 12)));
         for shape in ChordShape::ALL {
             let chord = Chord::new(root, shape);
+            let notes = chord.notes();
+            assert!(notes.windows(2).all(|pair| pair[0] < pair[1]), "{chord}");
+            assert!(root.pedal_note() < notes[0], "{chord}");
             assert!(
-                chord
-                    .notes()
+                notes
                     .iter()
                     .all(|note| allowed_pitch_classes.contains(&(note % 12))),
                 "{chord}"
+            );
+            assert!(
+                notes.iter().all(|note| {
+                    440.0 * 2.0_f32.powf((f32::from(*note) - 69.0) / 12.0) <= 420.0
+                }),
+                "{chord}: {notes:?}"
             );
         }
     }
@@ -188,6 +196,7 @@ fn mode_width_does_not_change_the_dry_event_pan() {
     let mix = Mix {
         master: Unit::new(0.1).unwrap(),
         drone: Unit::ZERO,
+        sub: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,
         melody: Unit::ZERO,

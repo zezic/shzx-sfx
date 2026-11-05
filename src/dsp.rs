@@ -1,6 +1,38 @@
 use fundsp::hacker32::{AudioNode, Biquad, BiquadCoefs};
 
-use crate::{DelaySnapshot, ParameterSnapshot};
+use crate::{DelaySnapshot, Pan, ParameterSnapshot, SpatialMode};
+
+/// Precomputed amplitude panning for the two positional spatial modes.
+#[derive(Clone, Copy)]
+pub(crate) struct PanGains {
+    pan: [f32; 2],
+    haas: [f32; 2],
+}
+
+impl PanGains {
+    pub fn new(position: Pan) -> Self {
+        let gains = |pan: f32| {
+            let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
+            [angle.cos(), angle.sin()]
+        };
+        Self {
+            pan: gains(position.get()),
+            haas: gains(position.get() * 0.33),
+        }
+    }
+
+    #[inline]
+    pub fn blend(self, haas: f32) -> [f32; 2] {
+        std::array::from_fn(|i| self.pan[i] + (self.haas[i] - self.pan[i]) * haas)
+    }
+
+    pub fn for_mode(self, spatial: SpatialMode) -> [f32; 2] {
+        match spatial {
+            SpatialMode::Pan => self.pan,
+            SpatialMode::Haas => self.haas,
+        }
+    }
+}
 
 /// Preserve ordinary signal levels and stereo balance; reserve the soft knee
 /// for overlapping events that exceed the output stage's headroom.
@@ -16,7 +48,35 @@ pub(crate) fn limit_stereo(frame: [f32; 2]) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Echo, EchoParameters, limit_stereo};
+    use super::{Echo, EchoParameters, Osc, SineTable, limit_stereo};
+
+    #[test]
+    fn startup_pitch_integrates_frequency_while_preserving_the_target() {
+        let rate = 8_000.0;
+        let hz = 173.0;
+        let table = SineTable::new();
+        let mut oscillator = Osc::new(hz, rate, 0.0);
+        for sample in 0_u32..=8_000 {
+            let time = sample as f32 / rate;
+            let pitch_ratio = time * time * (3.0 - 2.0 * time);
+            let value = oscillator.tick_scaled(&table, pitch_ratio);
+            if sample.is_multiple_of(1_000) {
+                let integrated_cycles = hz * (time.powi(3) - 0.5 * time.powi(4));
+                // A left Riemann sum trails the continuous integral by half a step.
+                let cycles = integrated_cycles - hz * pitch_ratio / (2.0 * rate);
+                let expected = (cycles * std::f32::consts::TAU).sin();
+                assert!(
+                    (value - expected).abs() < 0.001,
+                    "at {time}s: {value} vs {expected}"
+                );
+            }
+        }
+        assert_eq!(oscillator.frequency_hz(rate), hz);
+        let mut saw = Osc::new(hz, rate, 0.0);
+        for _ in 0..10 {
+            assert!(saw.saw_scaled(0.0).is_finite());
+        }
+    }
 
     #[test]
     fn output_knee_preserves_normal_signals_and_stereo_balance_under_overload() {
@@ -102,24 +162,30 @@ mod tests {
 pub(crate) struct LowPass {
     node: Biquad<f32>,
     sample_rate: f32,
+    q: f32,
 }
 
 impl LowPass {
     pub fn new(sample_rate: f32, cutoff: f32) -> Self {
+        Self::resonant(sample_rate, cutoff, std::f32::consts::FRAC_1_SQRT_2)
+    }
+
+    pub fn resonant(sample_rate: f32, cutoff: f32, q: f32) -> Self {
         Self {
             node: Biquad::with_coefs(BiquadCoefs::lowpass(
                 sample_rate,
                 cutoff.min(sample_rate * 0.45),
-                std::f32::consts::FRAC_1_SQRT_2,
+                q,
             )),
             sample_rate,
+            q,
         }
     }
     pub fn set_cutoff(&mut self, cutoff: f32) {
         self.node.set_coefs(BiquadCoefs::lowpass(
             self.sample_rate,
             cutoff.min(self.sample_rate * 0.45),
-            std::f32::consts::FRAC_1_SQRT_2,
+            self.q,
         ));
     }
     #[inline]
@@ -227,12 +293,38 @@ impl Osc {
     }
     #[inline]
     pub fn tick(&mut self, table: &SineTable) -> f32 {
+        self.tick_scaled(table, 1.0)
+    }
+
+    #[inline]
+    pub fn tick_scaled(&mut self, table: &SineTable, pitch_ratio: f32) -> f32 {
         let value = table.at(self.phase);
-        self.phase += self.step;
+        self.advance(self.step * pitch_ratio);
+        value
+    }
+
+    /// PolyBLEP removes the saw discontinuity's high-frequency aliasing.
+    #[inline]
+    pub fn saw_scaled(&mut self, pitch_ratio: f32) -> f32 {
+        let step = self.step * pitch_ratio;
+        let mut value = self.phase * 2.0 - 1.0;
+        if self.phase < step {
+            let t = self.phase / step;
+            value -= t + t - t * t - 1.0;
+        } else if self.phase > 1.0 - step {
+            let t = (self.phase - 1.0) / step;
+            value -= t * t + t + t + 1.0;
+        }
+        self.advance(step);
+        value
+    }
+
+    #[inline]
+    fn advance(&mut self, step: f32) {
+        self.phase += step;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        value
     }
 }
 

@@ -1,5 +1,100 @@
 use super::*;
 
+#[test]
+fn live_transmission_demo_obeys_deadlines_and_retries_commands_until_accepted() {
+    let burst = crate::transmission_demo(123, Duration::from_secs(5))
+        .next()
+        .unwrap();
+    let [start, end] = burst.commands();
+    let mut demo = LiveTransmissionDemo::new(std::iter::once(burst));
+    let mut accepted = Vec::new();
+    let mut send = |command| {
+        accepted.push(command);
+        Ok(())
+    };
+    demo.advance(Duration::from_secs_f64(start.at_seconds - 0.001), &mut send)
+        .unwrap();
+    assert!(accepted.is_empty());
+    assert!(matches!(
+        demo.advance(Duration::from_secs_f64(start.at_seconds), &mut |_| Err(
+            shzx_sfx::Error::QueueFull
+        )),
+        Err(shzx_sfx::Error::QueueFull)
+    ));
+    demo.advance(Duration::from_secs_f64(start.at_seconds), &mut |command| {
+        accepted.push(command);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(accepted, [start.command]);
+    demo.advance(
+        Duration::from_secs_f64(end.at_seconds - 0.001),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(accepted, [start.command]);
+    assert!(matches!(
+        demo.advance(Duration::from_secs_f64(end.at_seconds), &mut |_| Err(
+            shzx_sfx::Error::QueueFull
+        )),
+        Err(shzx_sfx::Error::QueueFull)
+    ));
+    demo.advance(
+        Duration::from_secs_f64(end.at_seconds + 0.01),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    )
+    .unwrap();
+    demo.advance(
+        Duration::from_secs_f64(end.at_seconds + 0.02),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(accepted, [start.command, end.command]);
+}
+
+#[test]
+fn live_transmission_demo_skips_expired_bursts_but_closes_an_admitted_start() {
+    let bursts: Vec<_> = crate::transmission_demo(123, Duration::from_secs(5))
+        .take(4)
+        .collect();
+    let [start, end] = bursts[2].commands();
+    let mut demo = LiveTransmissionDemo::new(bursts.iter().copied());
+    let mut accepted = Vec::new();
+    demo.advance(
+        Duration::from_secs_f64(bursts[1].end_seconds + 0.1),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(accepted.is_empty());
+    demo.advance(Duration::from_secs_f64(start.at_seconds), &mut |command| {
+        accepted.push(command);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(accepted, [start.command]);
+    demo.advance(
+        Duration::from_secs_f64(bursts[3].end_seconds + 60.0),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(accepted, [start.command, end.command]);
+}
+
 fn app() -> App {
     configured_app(RenderConfig::default())
 }
@@ -216,6 +311,23 @@ fn output_boost_and_independent_reverb_sends_obey_input_and_queue_contracts() {
         app.reverb.environment.send,
         app.initial_reverb.environment.send
     );
+    let before_melody = app.reverb;
+    app.adjust(
+        Control::Reverb(ReverbBus::Melody, ReverbField::Send),
+        -0.2,
+        &mut send,
+    );
+    app.adjust(
+        Control::Reverb(ReverbBus::Melody, ReverbField::Wet),
+        -0.15,
+        &mut send,
+    );
+    assert!((app.reverb.melody.send.get() - 0.75).abs() < 0.00001);
+    assert!((app.reverb.melody.wet.get() - 0.70).abs() < 0.00001);
+    assert_eq!(app.reverb.environment, before_melody.environment);
+    assert_eq!(app.reverb.events, before_melody.events);
+    assert_eq!(app.reverb.transmission, before_melody.transmission);
+    assert_eq!(commands.last(), Some(&Command::Reverb(app.reverb)));
     assert!(
         commands
             .iter()
@@ -226,6 +338,11 @@ fn output_boost_and_independent_reverb_sends_obey_input_and_queue_contracts() {
     app.adjust(Control::OutputGain, 6.0, &mut reject);
     app.adjust(
         Control::Reverb(ReverbBus::Environment, ReverbField::Room),
+        -0.2,
+        &mut reject,
+    );
+    app.adjust(
+        Control::Reverb(ReverbBus::Melody, ReverbField::Wet),
         -0.2,
         &mut reject,
     );
@@ -708,21 +825,15 @@ fn tonal_rate_endpoint_edits_preserve_the_other_endpoint_and_reset_to_the_palett
     let palette = app.edited_recipe().tonal_rate;
     let start = Control::SfxParameter(SfxParameter::Tonal(TonalParameter::RateStart));
     let end = Control::SfxParameter(SfxParameter::Tonal(TonalParameter::RateEnd));
+    let changed_start =
+        (palette.start().get() + 50.0).clamp(SfxStepRate::MIN_HZ, SfxStepRate::MAX_HZ);
+    let changed_end = (palette.end().get() - 50.0).clamp(SfxStepRate::MIN_HZ, SfxStepRate::MAX_HZ);
     app.adjust(start, 50.0, &mut send);
-    assert_eq!(
-        app.edited_recipe().tonal_rate.start().get(),
-        palette.start().get() + 50.0
-    );
+    assert_eq!(app.edited_recipe().tonal_rate.start().get(), changed_start);
     assert_eq!(app.edited_recipe().tonal_rate.end(), palette.end());
     app.adjust(end, -50.0, &mut send);
-    assert_eq!(
-        app.edited_recipe().tonal_rate.start().get(),
-        palette.start().get() + 50.0
-    );
-    assert_eq!(
-        app.edited_recipe().tonal_rate.end().get(),
-        palette.end().get() - 50.0
-    );
+    assert_eq!(app.edited_recipe().tonal_rate.start().get(), changed_start);
+    assert_eq!(app.edited_recipe().tonal_rate.end().get(), changed_end);
     let (current, _, _) = app.numeric(end).unwrap();
     app.adjust(end, app.numeric(start).unwrap().0 - current, &mut send);
     assert_eq!(

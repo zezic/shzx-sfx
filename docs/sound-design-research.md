@@ -1,6 +1,6 @@
 # Sound design research
 
-Research checked 2026-11-04. This document records the evidence behind the
+Research checked 2026-11-05. This document records the evidence behind the
 palette and proposed tuning directions. Numeric settings below are design
 starting points for listening tests, not experimentally established thresholds
 or a promise that a particular chord causes a particular emotion.
@@ -13,32 +13,64 @@ drone and repeating or emphasizing the tonic as ways to establish a modal
 center. This supports retaining a low reference pitch while changing the upper
 color tones. [Open Music Theory: Diatonic Modes](https://viva.pressbooks.pub/openmusictheory/chapter/diatonic-modes/)
 
-Suspended chord symbols replace the third with another interval, commonly the
-fourth. Removing the third leaves the chord without the major/minor distinction
-of a conventional triad. Common tones and small voice movements give smooth
-connections between voicings. [Open Music Theory: Chord Symbols](https://viva.pressbooks.pub/openmusictheory/chapter/chord-symbols/),
-[Open Music Theory: Jazz Voicings](https://viva.pressbooks.pub/openmusictheory/chapter/jazz-voicings/)
+Suspended chords omit the third, which removes the ordinary major/minor
+identity. A minor atmosphere needs an audible minor third rather than relying
+on a minor key signature alone. Berklee's voicing guidance treats the third
+and seventh as the defining notes of a seventh chord and allows the perfect
+fifth to be omitted. It also recommends placing tensions above the bass to
+avoid muddy spacing. [Open Music Theory: Chord Symbols](https://viva.pressbooks.pub/openmusictheory/chapter/chord-symbols/),
+[Berklee: Piano Voicing Techniques](https://online.berklee.edu/takenote/basic-piano-voicing-techniques/)
 
-Musical mood is contextual. A cross-cultural listening experiment found the
-major/minor happiness association strongly related to exposure to Western
-musical culture; the result does not establish a universal emotional meaning
-for either mode. Treat labels such as "cold" and "dramatic" as artistic
-intentions to evaluate by listening. [Smit et al.: Emotional responses in Papua New Guinea](https://pmc.ncbi.nlm.nih.gov/articles/PMC9242494/)
+In Lahdelma and Eerola's single-chord experiment, minor triads received the
+highest melancholy/sadness ratings, diminished and augmented triads were
+especially tense, and timbre and inversion affected the responses. A separate
+experiment found strong association between dissonance and perceived tension,
+while mildly dissonant minor-ninth and minor-seventh chords were among the
+most preferred. This supports quiet minor extensions as a melancholic base,
+with stronger tension used selectively; it does not establish that adding
+more dissonance always improves the result. [Lahdelma and Eerola: Single chords convey distinct emotional qualities](https://doi.org/10.1177/0305735614552006),
+[Lahdelma and Eerola: Mild Dissonance Preferred Over Consonance](https://doi.org/10.1177/2041669516655812)
 
-Proposed palette:
+Temperley and Tan compared melodies in six diatonic modes with the same tonic.
+Ionian was perceived as happiest; Aeolian and Phrygian provide useful darker
+alternatives, but familiarity explained much of the ordering. These results
+concern melodies, so applying them to this engine's sustained chords is an
+artistic inference. [Temperley and Tan: Emotional Connotations of Diatonic Modes](https://davidtemperley.com/wp-content/uploads/2015/11/temperley-tan.pdf)
 
-| Situation | Harmonic direction | Intended character |
+Musical mood is contextual. A cross-cultural experiment found the major/minor
+happiness association strongly related to exposure to Western-influenced
+music. These findings do not justify a universal emotion label for a chord or
+mode. "Melancholic" and "anxious" describe this palette's intended character,
+which still needs listening evaluation. [Smit et al.: Emotional responses in Papua New Guinea](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0269597)
+
+The implemented upper palette always retains a minor third, using A, D, or E
+minor over the ticker's unchanged diatonic pedal. A minor ninth retains the
+root, minor third, seventh, and ninth while omitting the fifth. E uses the
+shared collection's F natural as a flat ninth. A second
+profile uses a complementary minor upper chord with an added eleventh,
+choosing its anchor so the pedal does not complete a major triad. The anxious
+profile is the diatonic B half-diminished seventh,
+including its D minor third and F diminished fifth. Over a G pedal, use the
+minor-eleventh profile instead: B half-diminished over G becomes G9.
+Slash symbols report the actual upper chord and pedal separately. Keeping chord
+and pedal notes in A natural minor also preserves compatibility with sounding
+harmony reverb tails.
+These are design decisions informed by the findings above, rather than
+progressions prescribed by those studies.
+
+| Situation | Upper-harmony direction | Intended character |
 | --- | --- | --- |
-| Quiet or sideways view | sus2, sus4, minor add9, long pedal | Unresolved, restrained |
-| Rising trend | Minor add9 into wider minor7 or relative-major colors | More space and movement without a victory fanfare |
-| Falling trend | Minor add9, minor6 colors, diatonic tritone tension | Greater tension without an alarm |
-| High volatility | Retain harmonic center, introduce a quiet dissonant upper tone | Unsettled texture |
-| Dialog focus | Hold or thin the current voicing | Less competing musical information |
+| Quiet or sideways view | Minor ninth and minor seventh with added eleventh | Melancholic, unresolved |
+| Rising trend | Minor extensions with occasional half-diminished color | Movement without a major-key celebration |
+| Falling trend | More frequent half-diminished upper chords | Anxious, restrained |
+| High volatility | Periodic half-diminished color over the same pedal | Increased tension |
+| Very low volume | Prefer a minor eleventh to the half-diminished color | Less intrusive tension |
+| Dialog focus | Hold the current voicing | Less competing musical information |
 
-A useful A-centered audition sequence is Am(add9), Fmaj7/A, Dm(add9)/A,
-Esus4/A. Compare that with a less functional sequence of Asus2, Am(add9),
-Asus4, Am7. The implemented shared A-natural-minor collection uses F/B tension rather than a borrowed flat-second note, so symbol-root transitions keep every voiced note in the same scale. Keep close clusters out of the lowest register. These are compositional
-proposals, not claims about the cited textbook's recommended progressions.
+An A-pedal audition cycle is Am9(no5), Dm7(add11,no5)/A, Am9(no5),
+Bm7b5/A. A C pedal begins with Dm9(no5)/C; an F pedal begins with
+Em7(b9,no5)/F. In each case the upper chord retains its minor third rather
+than becoming a major voicing at a different ticker root.
 
 Choose chord changes on a slow musical clock, initially around 8-24 seconds.
 Changing the visible chart should update the next choice and gradually reshape
@@ -213,30 +245,90 @@ the CLI before connecting it to the terminal.
 ## Current implementation controls
 
 Ticker names select an anchor degree in A natural minor through a stable hash.
-Voicings transpose diatonically, including their actual major, minor, or
-half-diminished qualities; scale membership also keeps old delay/reverb tails
-compatible while the next ticker's pedal and pad crossfade. The base changes
+Generated upper voicings retain minor or half-diminished quality over that
+pedal; scale membership keeps sounding harmony reverb tails compatible while
+the next ticker's pedal and pad crossfade. The base changes
 only on a symbol command. Continuous view updates shape the arrangement and
 the next chord choice within that base.
+
+Pad chord tones use octave folding, inversions, and dropped octaves to stay
+below 420 Hz while preserving pitch classes, minor qualities, and chord
+symbols. The four voices remain distinct, sorted, and above the pedal;
+semitone neighbors created by folding are spread across octaves where possible.
+G4 is the highest nominal note in this range of A natural minor. With the
+maximum +0.055-semitone unison offset and +0.5-semitone drift, its oscillator
+frequency remains about 404.8 Hz.
+
+A separate sub layer spreads sixteen saw oscillators across pitch and panorama,
+one octave below the existing pedal. A resonant low-pass at 0.85 times the
+pedal frequency and a -15 dB, Q 1.3 bell at that pedal leave a low rumble.
+The sub shares the pad/pedal root crossfade and environment filtering. All
+audible oscillators share a smooth frequency ramp from zero to target over
+one second. Independent pad-note drifts wait 12-36 seconds initially, make
+6-12 second excursions within +/-0.5 semitone, then rest 18-50 seconds.
+
+Transmission start/end commands delimit a complex opening, up to a validated
+pulse budget, and a complex closing. Each burst independently chooses its
+opening, tick, and closing sounds from suitable effect pools. A separate
+preallocated SFX voice pool feeds two cascaded 8 kHz high-pass stages and its
+own reverb. At or below 16 kHz sample rate that high band stays silent.
+Defaults use 8% dry gain, 67% send, 83% damping, 25% wet, and a 22% transmission
+mixer level; the source bus has its own calibration after the strong high-pass
+attenuation. The nominal rate defaults to 10 Hz. At burst start, four group
+rates are chosen independently and uniformly from 0.75x to 1.25x the nominal
+rate, clamped to 2..80 Hz. Each group holds a constant rate, with at most three
+switches after ticks 4, 8, and 12; the final group holds its rate through the
+rest of the burst. These choices reproduce for a fixed seed and command
+timeline. UI mixer gain and reverb settings do not control this bus; the shared
+master and reverb return remain available.
+
+TUI transmission demos last a seeded random 300..5000 ms and allow up to 256
+pulses per burst, leaving room for repetition through the five-second maximum.
+Finite render and playback demos use 300..2000 ms bursts. Both leave 3..8 second
+gaps. The public transmission pulse budget defaults to 24.
 
 Routine event durations are reduced by approximately 35%. Orders, dialogs, alerts, and connection
 signatures retain their longer structures. Short clean oscillator flecks
 alternate with FM, PM, sync, pulse/folded, ring, crushed, and noise components.
 Articulated LP/HP profiles shape the main body; a separate high-pass
 path supplies brief 1.6-3.3 kHz HP / 12-17 kHz LP flecks at 7-15% level. Bright components
-end within milliseconds. Main pitch is fixed or settles at onset; no medium
-pitch sweep is mixed into a full-band event.
+end within milliseconds. After the one-second startup glide, main pitch is
+fixed or settles at onset.
+
+Distant melody notes are chosen uniformly from C5..B5 (MIDI 72..83), covering
+all twelve chromatic pitch classes independently of the chord and pedal's
+A-natural-minor collection. They use a smooth three-second attack and
+eight-second decay, for an eleven-second source envelope. Their oscillator
+frequency has +/-2.5% vibrato at 4.3 Hz, with phase derived from note age for
+reproducible rendering. The first entrance is scheduled seven seconds after
+startup, with at least eleven seconds between later entrances. The melody
+mixer defaults to 8%, and the UI/event mixer defaults to 40%.
+
+Melody and its existing ping-pong delay feed a dedicated reverb, with defaults
+of 95% send, 88% room, 68% damping, 92% width, and 85% wet. A 2.5% dry gain
+leaves the direct melody barely audible beneath its wet return. The TUI's
+Melody reverb selector, `ReverbSettings.melody`, and `reverb melody` commands
+expose these controls. Melody feeds this processor separately from the
+environment reverb, while mode and zoom HP/LP filters still shape the combined
+background output.
 
 Details and melody have independent damped ping-pong sends whose times,
 feedback, and sends react to zoom, volatility, activity, volume, and focus.
 Changing times crossfades between fixed taps, retaining old tails without
 turning the transition into a pitch slide.
 
-The environment and UI each use a diffuse, slowly modulated 32-channel hybrid
+The environment, UI, transmission, and melody buses each use a diffuse, slowly
+modulated 32-channel hybrid
 FDN with live loop filtering. This uses FunDSP's native Rust processor,
 preallocated at startup. Independent sends and returns preserve a close dry
-UI image while allowing longer, quieter tails. Focus modes narrow the wet
-image without altering dry panning. [FunDSP reverb2_stereo](https://docs.rs/fundsp/0.20.0/fundsp/hacker32/fn.reverb2_stereo.html)
+UI image while allowing longer, quieter tails. Focus modes narrow the
+environment, UI, and melody wet image without altering dry panning. [FunDSP reverb2_stereo](https://docs.rs/fundsp/0.20.0/fundsp/hacker32/fn.reverb2_stereo.html)
+
+Global Haas mode maps the requested SFX and transmission position range
+-1..1 to -0.33..0.33 for amplitude panning. Haas delay timing and crossfeed
+use the full requested position. Pan mode uses the full amplitude-pan range.
+Mode changes smoothly update gains for existing SFX voices and live
+transmissions. Ambient stereo width retains its separate controls.
 
 Source balance makes the noise, pad, and melody audible relative to the pedal;
 an independent -60..+24 dB output trim defaults to +12 dB. The monitor exposes
@@ -263,8 +355,9 @@ below 20 kHz sample rate. Filter bands are clamped for the actual sample rate.
 The Tonal editor exposes the sine carrier's tuning, FM index and modulator
 ratio, six pitch ratios, a separate rate envelope, and slot attack/release. Its
 signal passes through the slot gate, the event envelope, and the Tonal HP/LP
-filters. Default rate contours are 760->190 Hz for contact, 140->980 Hz for
-digital, 540->85 Hz for servo, and 90->420 Hz for air. The linear envelope
+filters. Default rate contours are 380->25 Hz for contact, 30->490 Hz for
+digital, 270->42.5 Hz for servo, and 45->210 Hz for air. Fixed and sweep
+step-rate overrides retain their supplied nominal rates. The linear envelope
 restarts on each macro phrase part. Clock phase integrates that rate rather
 than multiplying elapsed time by the instantaneous rate. The starting
 position remains seeded; edits to this clock change only Tonal, while

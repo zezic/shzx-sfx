@@ -449,8 +449,14 @@ fn slider(
     hits: &mut HitMap,
 ) {
     let focus = app.focus == control;
-    let label_width = 19_u16;
-    let value_width = (value.display.len() as u16 + 4).max(10);
+    let value_width = if area.width < 32 {
+        value.display.len() as u16 + 3
+    } else {
+        (value.display.len() as u16 + 4).max(10)
+    };
+    let bar_padding = if area.width < 32 { 6 } else { 7 };
+    let label_chars = 16.min(area.width.saturating_sub(value_width + bar_padding)) as usize;
+    let label_width = label_chars as u16 + 3;
     let bar_width = area.width.saturating_sub(label_width + value_width);
     let filled = (value.position.clamp(0.0, 1.0) * bar_width as f32).round() as usize;
     let bar = format!(
@@ -463,7 +469,7 @@ fn slider(
         .bg(if focus { FOCUSED } else { PANEL });
     frame.render_widget(
         Paragraph::new(format!(
-            "{} {label:<16} [{bar}] {}",
+            "{} {label:<label_chars$.label_chars$} [{bar}] {}",
             if focus { ">" } else { " " },
             value.display
         ))
@@ -519,20 +525,30 @@ fn market(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
 
 fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let inner = panel(frame, area, " MIXER / Independent layer levels ");
+    let columns = buttons::<2>(inner);
+    let rows = MixLayer::ALL.len().div_ceil(columns.len());
     for (index, layer) in MixLayer::ALL.into_iter().enumerate() {
+        let column = columns[index / rows];
         let value = SliderValue::percent(layer.get(app.mix));
         let label = match layer {
             MixLayer::Master => "Master",
             MixLayer::Drone => "Drone",
+            MixLayer::Sub => "Sub rumble",
             MixLayer::Texture => "Noise / glitches",
             MixLayer::Harmony => "Harmony",
             MixLayer::Melody => "Distant melody",
             MixLayer::Ui => "UI / events",
+            MixLayer::Transmission => "Transmission",
             MixLayer::Reverb => "Reverb return",
         };
         slider(
             frame,
-            Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1),
+            Rect::new(
+                column.x,
+                column.y + 1 + (index % rows) as u16,
+                column.width,
+                1,
+            ),
             label,
             value,
             Control::Mix(layer),
@@ -545,7 +561,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         .expect("output gain is numeric");
     slider(
         frame,
-        Rect::new(inner.x, inner.y + 8, inner.width, 1),
+        Rect::new(inner.x, inner.y + rows as u16 + 2, inner.width, 1),
         "Output gain",
         SliderValue {
             position: (gain - low) / (high - low),
@@ -555,22 +571,18 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         app,
         hits,
     );
-    if inner.height >= 11 {
+    if inner.height >= rows as u16 + 5 {
         frame.render_widget(
             Paragraph::new("Gains are linear; zero silences a layer. Changes are smoothed.")
                 .style(Style::default().fg(DIM)),
-            Rect::new(inner.x + 1, inner.y + 10, inner.width - 2, 1),
+            Rect::new(inner.x + 1, inner.y + rows as u16 + 4, inner.width - 2, 1),
         );
     }
 }
 
 fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
-    let inner = panel(
-        frame,
-        area,
-        " REVERB / Independent ambience and event spaces ",
-    );
-    let columns = buttons::<2>(Rect::new(inner.x, inner.y, inner.width, inner.height));
+    let inner = panel(frame, area, " REVERB / Independent FX spaces ");
+    let columns = buttons::<4>(Rect::new(inner.x, inner.y, inner.width, inner.height));
     for (bus, column) in ReverbBus::ALL.into_iter().zip(columns) {
         frame.render_widget(
             Paragraph::new(bus.label().to_ascii_uppercase())
@@ -582,7 +594,7 @@ fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             slider(
                 frame,
                 Rect::new(column.x, column.y + 2 + index as u16, column.width, 1),
-                field.label(),
+                field.label(column.width),
                 SliderValue::percent(field.get(parameters)),
                 Control::Reverb(bus, field),
                 app,
@@ -2090,7 +2102,14 @@ mod tests {
         effects_fixture(&mut snapshot);
         app.market = snapshot.market;
         app.snapshot = Some(snapshot);
-        for (width, height) in [(80, 24), (100, 32), (140, 24), (150, 24), (160, 36)] {
+        for (width, height) in [
+            (80, 24),
+            (100, 32),
+            (140, 24),
+            (150, 24),
+            (160, 36),
+            (280, 36),
+        ] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for (tab, title) in [
                 (Tab::Scene, "SCENE /"),
@@ -2141,20 +2160,32 @@ mod tests {
                     for expected in [
                         "ENVIRONMENT",
                         "UI / EVENTS",
-                        "Room / tail",
-                        "Damping",
+                        "TRANSMISSION",
+                        "MELODY",
+                        "Room",
+                        "Damp",
                         "Width",
                         "Send",
-                        "Wet level",
+                        "Wet",
                     ] {
                         assert!(
                             text.contains(expected),
                             "missing reverb control {expected:?}"
                         );
                     }
+                    for full_label in ["Room / tail", "Damping", "Wet level"] {
+                        assert_eq!(
+                            text.contains(full_label),
+                            width == 280,
+                            "incorrect reverb label {full_label:?} at {width}x{height}:\n{text}"
+                        );
+                    }
                     for bus in ReverbBus::ALL {
                         for field in ReverbField::ALL {
-                            assert!(hits.region(Control::Reverb(bus, field)).is_some());
+                            let hit = hits
+                                .region(Control::Reverb(bus, field))
+                                .expect("every reverb slider stays clickable");
+                            assert!(hit.width >= 3, "{bus:?} {field:?} at {width}x{height}");
                         }
                     }
                 }

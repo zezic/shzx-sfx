@@ -26,6 +26,8 @@ fn renderer(reverb: ReverbSettings) -> Renderer {
             master: unit(0.1),
             output_gain: OutputGain::new(0.0).unwrap(),
             drone: Unit::ZERO,
+            sub: Unit::ZERO,
+            transmission: Unit::ZERO,
             texture: Unit::ZERO,
             harmony: Unit::ZERO,
             melody: Unit::ZERO,
@@ -51,6 +53,126 @@ fn energy(frames: &[[f32; 2]]) -> f64 {
         .flatten()
         .map(|&sample| f64::from(sample).powi(2))
         .sum()
+}
+
+fn melody_renderer(reverb: ReverbSettings) -> Renderer {
+    Renderer::new(RenderConfig {
+        sample_rate: SAMPLE_RATE,
+        seed: 123,
+        reverb,
+        mix: Mix {
+            master: unit(0.1),
+            output_gain: OutputGain::new(0.0).unwrap(),
+            drone: Unit::ZERO,
+            sub: Unit::ZERO,
+            texture: Unit::ZERO,
+            harmony: Unit::ZERO,
+            ui: Unit::ZERO,
+            transmission: Unit::ZERO,
+            melody: Unit::ONE,
+            ..Mix::default()
+        },
+        ..RenderConfig::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn melody_has_an_independent_wet_dominant_space_and_a_tail_after_its_source_ends() {
+    let settings = ReverbSettings::default();
+    let mut isolated = settings;
+    for bus in [
+        &mut isolated.environment,
+        &mut isolated.events,
+        &mut isolated.transmission,
+    ] {
+        bus.send = Unit::ZERO;
+        bus.wet = Unit::ZERO;
+    }
+    let mut dry_settings = settings;
+    dry_settings.melody.wet = Unit::ZERO;
+    let mut reference = melody_renderer(settings);
+    let mut independent = melody_renderer(isolated);
+    let mut dry = melody_renderer(dry_settings);
+    let mut wet_energy = 0.0;
+    let mut dry_energy = 0.0;
+    let mut wet_tail = 0.0;
+    let mut dry_tail = 0.0;
+    for frame in 0..SAMPLE_RATE * 20 {
+        let wet = reference.next_frame();
+        assert_eq!(
+            wet,
+            independent.next_frame(),
+            "other FX buses must not receive melody"
+        );
+        let direct = dry.next_frame();
+        let sum = |frame: [f32; 2]| {
+            frame
+                .into_iter()
+                .map(|value| f64::from(value).powi(2))
+                .sum::<f64>()
+        };
+        if (SAMPLE_RATE * 10..SAMPLE_RATE * 17).contains(&frame) {
+            wet_energy += sum(wet);
+            dry_energy += sum(direct);
+        }
+        if frame >= SAMPLE_RATE * 19 {
+            wet_tail += sum(wet);
+            dry_tail += sum(direct);
+        }
+    }
+    eprintln!(
+        "melody wet/dry energy ratio {}; tail {wet_tail:.8e} vs dry {dry_tail:.8e}",
+        wet_energy / dry_energy
+    );
+    assert!(dry_energy > 0.0, "a little direct signal remains");
+    assert!(
+        wet_energy > dry_energy * 25.0,
+        "reverberation should dominate the source"
+    );
+    assert!(wet_tail > dry_tail * 100.0);
+    assert_eq!(
+        reference.snapshot().background.melody.voice,
+        shzx_sfx::BackgroundVoice::Silent
+    );
+}
+
+#[test]
+fn melody_wet_automation_mutes_and_restores_its_return_without_resetting_the_space() {
+    let initial = ReverbSettings::default();
+    let mut reference = melody_renderer(initial);
+    let mut automated = melody_renderer(initial);
+    render(&mut reference, 13.0);
+    render(&mut automated, 13.0);
+    let mut muted = initial;
+    muted.melody.wet = Unit::ZERO;
+    automated.apply(Command::Reverb(muted));
+    render(&mut reference, 0.8);
+    render(&mut automated, 0.8);
+    let reference_muted = energy(&render(&mut reference, 0.3));
+    let actual_muted = energy(&render(&mut automated, 0.3));
+    assert!(actual_muted < reference_muted * 0.05);
+    automated.apply(Command::Reverb(initial));
+    render(&mut reference, 0.8);
+    render(&mut automated, 0.8);
+    let reference_restored = render(&mut reference, 0.3);
+    let actual_restored = render(&mut automated, 0.3);
+    let reference_energy = energy(&reference_restored);
+    let error = reference_restored
+        .iter()
+        .zip(actual_restored)
+        .flat_map(|(a, b)| {
+            a.iter()
+                .copied()
+                .zip(b)
+                .map(|(a, b)| f64::from(a - b).powi(2))
+        })
+        .sum::<f64>();
+    assert!(reference_energy > 1e-8);
+    assert!(
+        (error / reference_energy).sqrt() < 0.003,
+        "restoring wet must recover the same room state"
+    );
 }
 
 /// End after all source and Haas/filter samples, before observing reverb alone.

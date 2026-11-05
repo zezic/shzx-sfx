@@ -3,14 +3,15 @@ use std::{
     fs::File,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use shzx_sfx::{
-    Command, MarketContext, Mix, Mode, OutputGain, Pan, RenderConfig, Renderer, ReverbSettings,
-    SfxEvent, SfxKind, SfxLayerSelection, Snapshot, SpatialMode, Symbol, Trend, Unit,
+    Command, DataTransmission, DataTransmissionCommand, MarketContext, Mix, Mode, OutputGain, Pan,
+    RenderConfig, Renderer, ReverbSettings, SfxEvent, SfxKind, SfxLayerSelection, Snapshot,
+    SpatialMode, Symbol, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -118,10 +119,12 @@ impl EngineArgs {
 enum MixLayer {
     Master,
     Drone,
+    Sub,
     Texture,
     Harmony,
     Melody,
     Ui,
+    Transmission,
     Reverb,
 }
 
@@ -130,29 +133,42 @@ enum MixLayer {
 enum ReverbBus {
     Environment,
     Events,
+    Transmission,
+    Melody,
 }
 
 #[cfg(feature = "playback")]
 impl ReverbBus {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 2] = [Self::Environment, Self::Events];
+    const ALL: [Self; 4] = [
+        Self::Environment,
+        Self::Events,
+        Self::Transmission,
+        Self::Melody,
+    ];
     #[cfg(feature = "tui")]
     fn label(self) -> &'static str {
         match self {
             Self::Environment => "Environment",
             Self::Events => "UI / events",
+            Self::Transmission => "Transmission",
+            Self::Melody => "Melody",
         }
     }
     fn get(self, settings: ReverbSettings) -> ReverbParameters {
         match self {
             Self::Environment => settings.environment,
             Self::Events => settings.events,
+            Self::Transmission => settings.transmission,
+            Self::Melody => settings.melody,
         }
     }
     fn set(self, settings: &mut ReverbSettings, parameters: ReverbParameters) {
         *match self {
             Self::Environment => &mut settings.environment,
             Self::Events => &mut settings.events,
+            Self::Transmission => &mut settings.transmission,
+            Self::Melody => &mut settings.melody,
         } = parameters;
     }
 }
@@ -178,12 +194,15 @@ impl ReverbField {
         Self::Wet,
     ];
     #[cfg(feature = "tui")]
-    fn label(self) -> &'static str {
+    fn label(self, width: u16) -> &'static str {
         match self {
             Self::Send => "Send",
+            Self::Room if width < 32 => "Room",
             Self::Room => "Room / tail",
+            Self::Damping if width < 32 => "Damp",
             Self::Damping => "Damping",
             Self::Width => "Width",
+            Self::Wet if width < 32 => "Wet",
             Self::Wet => "Wet level",
         }
     }
@@ -210,13 +229,15 @@ impl ReverbField {
 
 impl MixLayer {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::Master,
         Self::Drone,
+        Self::Sub,
         Self::Texture,
         Self::Harmony,
         Self::Melody,
         Self::Ui,
+        Self::Transmission,
         Self::Reverb,
     ];
 
@@ -225,10 +246,12 @@ impl MixLayer {
         match self {
             Self::Master => mix.master,
             Self::Drone => mix.drone,
+            Self::Sub => mix.sub,
             Self::Texture => mix.texture,
             Self::Harmony => mix.harmony,
             Self::Melody => mix.melody,
             Self::Ui => mix.ui,
+            Self::Transmission => mix.transmission,
             Self::Reverb => mix.reverb,
         }
     }
@@ -237,19 +260,30 @@ impl MixLayer {
         *match self {
             Self::Master => &mut mix.master,
             Self::Drone => &mut mix.drone,
+            Self::Sub => &mut mix.sub,
             Self::Texture => &mut mix.texture,
             Self::Harmony => &mut mix.harmony,
             Self::Melody => &mut mix.melody,
             Self::Ui => &mut mix.ui,
+            Self::Transmission => &mut mix.transmission,
             Self::Reverb => &mut mix.reverb,
         } = level;
     }
 }
 
 #[derive(Args)]
+struct TransmissionDemoArgs {
+    /// Include sporadic transmissions in the TUI or built-in demo.
+    #[arg(long = "data-transmission-demo", default_value_t = true, action = clap::ArgAction::Set)]
+    enabled: bool,
+}
+
+#[derive(Args)]
 struct RenderArgs {
     #[command(flatten)]
     engine: EngineArgs,
+    #[command(flatten)]
+    transmission_demo: TransmissionDemoArgs,
     #[arg(short, long)]
     output: PathBuf,
     /// JSONL trace destination; defaults to OUTPUT with .jsonl extension.
@@ -312,6 +346,8 @@ struct PlayArgs {
     #[command(flatten)]
     engine: EngineArgs,
     #[command(flatten)]
+    transmission_demo: TransmissionDemoArgs,
+    #[command(flatten)]
     output: OutputArgs,
     /// Use the line-oriented prompt instead of the terminal control panel.
     #[arg(long, conflicts_with_all = ["demo", "script"])]
@@ -356,6 +392,8 @@ impl OutputArgs {
 struct TuiArgs {
     #[command(flatten)]
     engine: EngineArgs,
+    #[command(flatten)]
+    transmission_demo: TransmissionDemoArgs,
     #[command(flatten)]
     output: OutputArgs,
 }
@@ -567,6 +605,70 @@ fn demo(seconds: f64) -> Vec<TimedCommand> {
     ]
 }
 
+#[derive(Clone, Copy)]
+struct TransmissionDemoBurst {
+    start_seconds: f64,
+    end_seconds: f64,
+    settings: DataTransmission,
+}
+
+impl TransmissionDemoBurst {
+    fn commands(self) -> [TimedCommand; 2] {
+        [
+            TimedCommand {
+                at_seconds: self.start_seconds,
+                command: Command::DataTransmission(DataTransmissionCommand::Start(self.settings)),
+            },
+            TimedCommand {
+                at_seconds: self.end_seconds,
+                command: Command::DataTransmission(DataTransmissionCommand::End),
+            },
+        ]
+    }
+}
+
+fn transmission_demo(
+    seed: u64,
+    max_duration: Duration,
+) -> impl Iterator<Item = TransmissionDemoBurst> {
+    let mut rng = fastrand::Rng::with_seed(seed ^ 0x5458_4445_4d4f);
+    let mut start = 1.5 + rng.f64() * 2.0;
+    let max_duration_ms =
+        u32::try_from(max_duration.as_millis()).expect("demo durations fit in u32 milliseconds");
+    let settings = DataTransmission {
+        max_triggers: shzx_sfx::TransmissionCount::new(shzx_sfx::TransmissionCount::MAX)
+            .expect("the maximum pulse budget is valid"),
+        ..DataTransmission::default()
+    };
+    std::iter::from_fn(move || {
+        let duration_ms = rng.u32(300..=max_duration_ms);
+        let end = start + f64::from(duration_ms) / 1_000.0;
+        let burst = TransmissionDemoBurst {
+            start_seconds: start,
+            end_seconds: end,
+            settings: DataTransmission {
+                pan: Pan::new(rng.f32() * 1.6 - 0.8).expect("demo pan is in range"),
+                ..settings
+            },
+        };
+        start = end + 3.0 + rng.f64() * 5.0;
+        Some(burst)
+    })
+}
+
+fn demo_scene(seconds: f64, seed: u64, data_transmission: bool) -> Vec<TimedCommand> {
+    let mut entries = demo(seconds);
+    if data_transmission {
+        entries.extend(
+            transmission_demo(seed, Duration::from_secs(2))
+                // Keep both commands inside the finite export or playback.
+                .take_while(|burst| burst.end_seconds < seconds - 0.25)
+                .flat_map(TransmissionDemoBurst::commands),
+        );
+    }
+    entries
+}
+
 struct Session {
     renderer: Renderer,
     schedule: Vec<ScheduledCommand>,
@@ -758,6 +860,7 @@ fn palette(args: PaletteArgs) -> CliResult<()> {
     }
     let mut config = args.engine.config()?;
     config.mix.drone = Unit::ZERO;
+    config.mix.sub = Unit::ZERO;
     config.mix.texture = Unit::ZERO;
     config.mix.harmony = Unit::ZERO;
     config.mix.melody = Unit::ZERO;
@@ -934,12 +1037,19 @@ fn run(cli: Cli) -> CliResult<()> {
         Action::Tui(args) => {
             tui::require_terminal()?;
             let config = args.engine.config()?;
-            tui::run(args.output.start(config)?, config)
+            tui::run(
+                args.output.start(config)?,
+                config,
+                args.transmission_demo
+                    .enabled
+                    .then(|| transmission_demo(config.seed, Duration::from_secs(5))),
+            )
         }
         Action::Render(args) => {
             let mut config = args.engine.config()?;
             let entries = if let Some(kind) = args.effect {
                 config.mix.drone = Unit::ZERO;
+                config.mix.sub = Unit::ZERO;
                 config.mix.texture = Unit::ZERO;
                 config.mix.harmony = Unit::ZERO;
                 config.mix.melody = Unit::ZERO;
@@ -953,7 +1063,7 @@ fn run(cli: Cli) -> CliResult<()> {
             } else {
                 match &args.script {
                     Some(path) => read_script(path)?,
-                    None => demo(args.seconds),
+                    None => demo_scene(args.seconds, config.seed, args.transmission_demo.enabled),
                 }
             };
             export(
@@ -1105,7 +1215,7 @@ fn play(args: PlayArgs) -> CliResult<()> {
         let frames = total_frames(args.seconds, config.sample_rate)?;
         let entries = match &args.script {
             Some(path) => read_script(path)?,
-            None => demo(args.seconds),
+            None => demo_scene(args.seconds, config.seed, args.transmission_demo.enabled),
         };
         Some(schedule(entries, frames, config.sample_rate)?)
     } else {
@@ -1117,7 +1227,13 @@ fn play(args: PlayArgs) -> CliResult<()> {
         && std::io::IsTerminal::is_terminal(&io::stdin())
         && std::io::IsTerminal::is_terminal(&io::stdout())
     {
-        return tui::run(args.output.start(config)?, config);
+        return tui::run(
+            args.output.start(config)?,
+            config,
+            args.transmission_demo
+                .enabled
+                .then(|| transmission_demo(config.seed, Duration::from_secs(5))),
+        );
     }
     let mut engine = args.output.start(config)?;
     println!("Output: {:?}", engine.output_info());
@@ -1227,6 +1343,18 @@ fn repl_command(line: &str, mix: Mix, reverb: ReverbSettings) -> CliResult<ReplA
         ("mode", 2) => Ok(ReplAction::send(Command::Mode(words[1].parse()?))),
         ("spatial", 2) => Ok(ReplAction::send(Command::Spatial(words[1].parse()?))),
         ("symbol", 2) => Ok(ReplAction::send(Command::Symbol(Symbol::new(words[1])?))),
+        ("transmission", 2..=3) => {
+            let command = match (words[1], words.len()) {
+                ("start", _) => DataTransmissionCommand::Start(DataTransmission {
+                    pan: Pan::new(words.get(2).map_or(Ok(0.0), |value| value.parse::<f32>())?)?,
+                    ..DataTransmission::default()
+                }),
+                ("pan", 3) => DataTransmissionCommand::Pan(Pan::new(words[2].parse()?)?),
+                ("end", 2) => DataTransmissionCommand::End,
+                _ => return Err(invalid("use transmission start [PAN], pan PAN, or end").into()),
+            };
+            Ok(ReplAction::send(Command::DataTransmission(command)))
+        }
         ("mix", 3) => {
             let layer = MixLayer::from_str(words[1], true).map_err(invalid)?;
             let mut next = mix;
@@ -1313,13 +1441,131 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
 #[cfg(feature = "playback")]
 fn repl_help() {
     println!(
-        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|texture|harmony|melody|ui|reverb LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
+        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn both_tui_entrypoints_enable_transmission_demos_and_accept_opt_out() {
+        for entrypoint in ["tui", "play"] {
+            for (flags, expected) in [
+                (vec![], true),
+                (vec!["--data-transmission-demo", "false"], false),
+            ] {
+                let cli =
+                    Cli::try_parse_from(["shzx-sfx", entrypoint].into_iter().chain(flags)).unwrap();
+                let enabled = match cli.command {
+                    Action::Tui(args) => args.transmission_demo.enabled,
+                    Action::Play(args) => args.transmission_demo.enabled,
+                    _ => unreachable!(),
+                };
+                assert_eq!(enabled, expected, "{entrypoint}");
+            }
+        }
+    }
+
+    #[test]
+    fn transmission_demo_is_enabled_by_default_and_schedules_seeded_bounded_pairs() {
+        let cli = Cli::try_parse_from(["shzx-sfx", "render", "--output", "/tmp/demo.wav"]).unwrap();
+        let Action::Render(args) = cli.command else {
+            unreachable!()
+        };
+        assert!(args.transmission_demo.enabled);
+        let cli = Cli::try_parse_from([
+            "shzx-sfx",
+            "render",
+            "--output",
+            "/tmp/demo.wav",
+            "--data-transmission-demo",
+            "false",
+        ])
+        .unwrap();
+        let Action::Render(args) = cli.command else {
+            unreachable!()
+        };
+        assert!(!args.transmission_demo.enabled);
+        let enabled = demo_scene(60.0, 123, true);
+        let repeated = demo_scene(60.0, 123, true);
+        assert_eq!(
+            serde_json::to_string(&enabled).unwrap(),
+            serde_json::to_string(&repeated).unwrap()
+        );
+        let pairs: Vec<_> = enabled
+            .iter()
+            .filter(|entry| matches!(entry.command, Command::DataTransmission(_)))
+            .collect();
+        assert!(pairs.len() >= 4);
+        let (pairs, remainder) = pairs.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        for pair in pairs {
+            assert!(matches!(
+                pair[0].command,
+                Command::DataTransmission(DataTransmissionCommand::Start(_))
+            ));
+            assert_eq!(
+                pair[1].command,
+                Command::DataTransmission(DataTransmissionCommand::End)
+            );
+            let duration_ms = (pair[1].at_seconds - pair[0].at_seconds) * 1000.0;
+            assert!((299.999..=2000.001).contains(&duration_ms));
+            assert!(pair[1].at_seconds < 60.0);
+        }
+        assert!(
+            demo_scene(60.0, 123, false)
+                .iter()
+                .all(|entry| !matches!(entry.command, Command::DataTransmission(_)))
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_demo_includes_long_bursts_with_ticks_until_the_end_event() {
+        let bursts: Vec<_> = transmission_demo(123, Duration::from_secs(5))
+            .take(64)
+            .collect();
+        assert!(bursts.iter().all(|burst| {
+            (0.299999..=5.000001).contains(&(burst.end_seconds - burst.start_seconds))
+        }));
+        let longest = bursts
+            .iter()
+            .max_by(|a, b| {
+                (a.end_seconds - a.start_seconds).total_cmp(&(b.end_seconds - b.start_seconds))
+            })
+            .unwrap();
+        let duration = longest.end_seconds - longest.start_seconds;
+        assert!(duration > 4.5);
+        let mut renderer = Renderer::new(RenderConfig {
+            sample_rate: 8_000,
+            mix: Mix {
+                master: Unit::ZERO,
+                ..Mix::default()
+            },
+            ..RenderConfig::default()
+        })
+        .unwrap();
+        renderer.apply(Command::DataTransmission(DataTransmissionCommand::Start(
+            longest.settings,
+        )));
+        for _ in 0..(duration * 8_000.0) as usize {
+            renderer.next_frame();
+        }
+        let before_end = renderer.snapshot().transmission;
+        assert_eq!(before_end.phase, shzx_sfx::TransmissionPhase::Repeating);
+        assert!(before_end.repeated > 24);
+        renderer.apply(Command::DataTransmission(DataTransmissionCommand::End));
+        for _ in 0..8_000 {
+            renderer.next_frame();
+        }
+        assert_eq!(
+            renderer.snapshot().transmission.phase,
+            shzx_sfx::TransmissionPhase::Idle
+        );
+    }
 
     #[test]
     fn timeline_validation_is_strict_and_preserves_simultaneous_command_order() {

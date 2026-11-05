@@ -17,6 +17,8 @@ fn dry_renderer(sample_rate: u32) -> Renderer {
             master: Unit::new(0.1).unwrap(),
             output_gain: OutputGain::new(0.0).unwrap(),
             drone: Unit::ZERO,
+            sub: Unit::ZERO,
+            transmission: Unit::ZERO,
             texture: Unit::ZERO,
             harmony: Unit::ZERO,
             melody: Unit::ZERO,
@@ -50,7 +52,7 @@ fn render_spatial_event(
 ) -> (GeneratedEvent, Vec<[f32; 2]>) {
     let mut renderer = dry_renderer(sample_rate);
     renderer.apply(Command::Spatial(spatial));
-    let mut warmup = vec![[0.0; 2]; sample_rate as usize / 4];
+    let mut warmup = vec![[0.0; 2]; sample_rate as usize * 5 / 4];
     renderer.render(&mut warmup);
     renderer.apply(Command::Trigger(event));
     let generated = renderer.snapshot().last_event.unwrap();
@@ -69,6 +71,117 @@ fn energy(frames: &[[f32; 2]]) -> f64 {
         .flatten()
         .map(|&sample| f64::from(sample).powi(2))
         .sum()
+}
+
+#[test]
+fn haas_narrows_amplitude_pan_to_thirty_three_percent_and_keeps_full_delay() {
+    let sample_rate = 48_000;
+    let delay_frames = 384;
+    for pan in [-1.0_f32, 1.0] {
+        let event = SfxEvent {
+            pan: Pan::new(pan).unwrap(),
+            layers: SfxLayerSelection::Only(SfxLayer::Body),
+            ..SfxEvent::new(SfxKind::Click)
+        };
+        let (generated, haas) = render_spatial_event(event, sample_rate, SpatialMode::Haas);
+        let full = render_spatial_event(event, sample_rate, SpatialMode::Pan).1;
+        let mapped = render_spatial_event(
+            SfxEvent {
+                pan: Pan::new(pan * 0.33).unwrap(),
+                ..event
+            },
+            sample_rate,
+            SpatialMode::Pan,
+        )
+        .1;
+        assert_eq!(generated.pan, event.pan);
+        let near = usize::from(pan > 0.0);
+        let far = 1 - near;
+        let channel_energy = |frames: &[[f32; 2]], channel: usize| {
+            frames[..delay_frames]
+                .iter()
+                .map(|frame| f64::from(frame[channel]).powi(2))
+                .sum::<f64>()
+        };
+        assert!(channel_energy(&full, far) < channel_energy(&full, near) * 1e-10);
+        let ratio = channel_energy(&haas, near) / channel_energy(&haas, far);
+        assert!(
+            (2.9..3.2).contains(&ratio),
+            "early Haas energy ratio {ratio}"
+        );
+
+        let angle = (pan * 0.33 + 1.0) * std::f32::consts::FRAC_PI_4;
+        let near_gain = [angle.cos(), angle.sin()][near];
+        let mut error = 0.0;
+        let mut delayed_energy = 0.0;
+        for index in 0..haas.len().min(mapped.len()) {
+            let residual = haas[index][far] - mapped[index][far];
+            let expected = if index < delay_frames {
+                0.0
+            } else {
+                mapped[index - delay_frames][near] * 0.18 / near_gain
+            };
+            error += f64::from(residual - expected).powi(2);
+            delayed_energy += f64::from(expected).powi(2);
+        }
+        assert!(delayed_energy > 1e-10);
+        assert!(
+            (error / delayed_energy).sqrt() < 0.002,
+            "crossfeed must retain its 8 ms delay and full requested-pan amount"
+        );
+    }
+    let center = SfxEvent::new(SfxKind::Confirm);
+    assert_eq!(
+        render_spatial_event(center, sample_rate, SpatialMode::Pan).1,
+        render_spatial_event(center, sample_rate, SpatialMode::Haas).1
+    );
+}
+
+#[test]
+fn spatial_mode_edits_smoothly_change_a_sounding_voice() {
+    let mut pan = dry_renderer(48_000);
+    let mut haas = dry_renderer(48_000);
+    let mut changing = dry_renderer(48_000);
+    haas.apply(Command::Spatial(SpatialMode::Haas));
+    let event = SfxEvent {
+        pan: Pan::new(1.0).unwrap(),
+        layers: SfxLayerSelection::Only(SfxLayer::Body),
+        ..SfxEvent::new(SfxKind::OrderFill)
+    };
+    for renderer in [&mut pan, &mut haas, &mut changing] {
+        for _ in 0..60_000 {
+            renderer.next_frame();
+        }
+        renderer.apply(Command::Trigger(event));
+    }
+    let mut onset_error = 0.0;
+    let mut onset_span = 0.0;
+    let mut settled_error = 0.0;
+    let mut settled_energy = 0.0;
+    for frame in 0..24_000 {
+        if frame == 960 {
+            changing.apply(Command::Spatial(SpatialMode::Haas));
+        }
+        let a = pan.next_frame();
+        let b = haas.next_frame();
+        let c = changing.next_frame();
+        assert!(c.into_iter().all(f32::is_finite));
+        if frame < 960 {
+            assert_eq!(a, c);
+        }
+        for channel in 0..2 {
+            if (960..1008).contains(&frame) {
+                onset_error += f64::from(c[channel] - a[channel]).powi(2);
+                onset_span += f64::from(b[channel] - a[channel]).powi(2);
+            }
+            if frame > 12_000 {
+                settled_error += f64::from(c[channel] - b[channel]).powi(2);
+                settled_energy += f64::from(b[channel]).powi(2);
+            }
+        }
+    }
+    assert!(onset_span > 1e-12 && onset_error < onset_span * 0.02);
+    assert!(settled_energy > 1e-12 && settled_error < settled_energy * 0.0001);
 }
 
 fn spectral_share_above(frames: &[[f32; 2]], sample_rate: u32, cutoff_hz: f32) -> f64 {
