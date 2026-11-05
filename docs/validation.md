@@ -585,3 +585,58 @@ are 0.00727 and 0.00520. These
 are offline signal checks, not a listening verdict or native device test.
 Both WAVs and their mode-bearing JSONL traces are in
 `/private/tmp/shzx-sfx-dissonance-audit/`.
+
+
+## Reference-calibrated demonic voices
+
+Checked 2026-11-05. A/O/U now use vowel-specific narrow principal resonances
+and weak supporting bands fitted against `../demonic-voices-reference.wav`.
+Two cascaded peak-normalized sections per branch suppress unwanted skirts;
+a quiet broad upper branch preserves the rounded vowel's raised region
+between its upper details. The six branches and their states are bounded
+and preallocated. Excitation, utterance scheduling, and public controls retain
+their existing contracts. See [the analysis](demonic-voices-research.md) for
+methods, plots, source citations, and local listening artifacts.
+
+At 44.1 kHz, seed 123, isolated dry voice gain 1, the representative O
+measurement changes from a 576 Hz dominant peak and 231 Hz apparent width
+to 382/108 Hz; the reference is 371/108 Hz. O power at 250-600 Hz changes
+from 52.17% to 97.05%, against 96.62% in the reference. Its 2-4 kHz share
+changes from 1.390% to 0.190%, against 0.184%. A changes from 969/199 Hz
+to 845/102 Hz, against 829/81 Hz, while its 2-4 kHz share changes from
+2.29% to 9.29%, against 9.82%. Widths describe smoothed output spectra,
+not configured per-section bandwidths.
+
+The eight voice unit tests pass, including output-spectrum checks across
+8/48/192 kHz, both profiles, three seeds, and 30/70/110 Hz excitation cases.
+They check vowel-dependent peaks and power, supporting detail, upper bridge
+contrast, A-to-I articulation, bounded excitation, filter response, and
+extreme-rate retirement. In the sustained-vowel regression, O upper-band
+share spans 0.182-0.197%, A spans 9.35-10.09%, and the rounded upper
+bridge-to-mid-valley mean power ratio spans 1.82-2.41.
+
+`cargo test --release --no-default-features --no-fail-fast` yields 128 passed
+and four failures. A separately compiled archive of HEAD yields 127 passed
+and five failures. Every current failure is also present in that archive:
+
+- `background::tests::sub_is_a_quiet_stereo_rumble_an_octave_below_each_root`
+- `background::tests::sub_bell_attenuates_the_original_root_and_tracks_retuning`
+- `pending_harmony_uses_live_context_and_crossfade_progress_tracks_rendering`
+- `rapid_symbol_changes_finish_the_current_fade_before_the_latest_pending_root`
+
+The archive additionally fails the universal whisper-amplitude test replaced
+by the reference-envelope regression. Current ambient gain/determinism,
+reverb routing/tails, and allocation-free rendering/command tests pass.
+All 41 CLI/TUI tests pass with all features, and
+`cargo clippy --all-targets --all-features -- -D warnings` passes. Full logs
+and baseline comparisons are in ignored `target/voice-analysis/`.
+
+Paired release benchmarks used frozen original and tuned executables,
+48 kHz, 256-frame blocks, seed/default settings, and two alternating
+before/after repetitions per workload. Interactive 30-second means were
+2.059634 seconds before and 2.158429 after: 6.865% to 7.195% of realtime
+wall time, or 4.80% more wall time. Idle means were 1.869128 and 1.903818
+seconds: 6.230% to 6.346%, or 1.86% more wall time, with greater variation
+between idle runs. These measure offline throughput, not native callback
+CPU usage or scheduling. Raw runs and hashes are in
+`target/voice-analysis/paired-benchmarks.json`.

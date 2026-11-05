@@ -14,6 +14,7 @@ enum VoiceKind {
 
 const EXCITATION_GAIN_6_DB: f32 = 1.995_262_3;
 const FORMANT_TRANSITION_SECONDS: f32 = 0.030;
+const RESONANCE_COUNT: usize = 6;
 
 struct Excitation {
     pink: Pinkpass<f32>,
@@ -50,19 +51,28 @@ enum Vowel {
 }
 
 #[derive(Clone, Copy)]
-enum WhisperProfile {
-    Male,
-    Female,
+enum VoiceProfile {
+    Low,
+    High,
 }
 
 #[derive(Clone, Copy)]
 struct Formant {
     frequency_hz: f32,
+    /// Nominal per-section bandwidth; broad bands are calibrated by their response.
     bandwidth_hz: f32,
     peak_db: f32,
 }
 
 impl Formant {
+    const fn new(frequency_hz: f32, bandwidth_hz: f32, peak_db: f32) -> Self {
+        Self {
+            frequency_hz,
+            bandwidth_hz,
+            peak_db,
+        }
+    }
+
     fn interpolate(self, to: Self, t: f32) -> Self {
         Self {
             frequency_hz: self.frequency_hz + (to.frequency_hz - self.frequency_hz) * t,
@@ -72,38 +82,149 @@ impl Formant {
     }
 }
 
-fn formants(hz: [f32; 3], bandwidths: [f32; 3], peaks_db: [f32; 3]) -> [Formant; 3] {
-    std::array::from_fn(|i| Formant {
-        frequency_hz: hz[i],
-        bandwidth_hz: bandwidths[i],
-        peak_db: peaks_db[i],
-    })
+#[must_use]
+#[derive(Clone, Copy)]
+struct VocalShape {
+    formants: [Formant; 3],
+    low: Option<Formant>,
+    body: Option<Formant>,
+    upper: Option<Formant>,
+}
+
+impl VocalShape {
+    fn new(hz: [f32; 3], bandwidths: [f32; 3], peaks_db: [f32; 3]) -> Self {
+        Self {
+            formants: std::array::from_fn(|i| Formant::new(hz[i], bandwidths[i], peaks_db[i])),
+            low: None,
+            body: None,
+            upper: None,
+        }
+    }
+
+    fn with_low(mut self, formant: Formant) -> Self {
+        self.low = Some(formant);
+        self
+    }
+
+    fn with_body(mut self, formant: Formant) -> Self {
+        self.body = Some(formant);
+        self
+    }
+
+    fn with_upper(mut self, formant: Formant) -> Self {
+        self.upper = Some(formant);
+        self
+    }
+
+    fn bands(self) -> [Option<Formant>; RESONANCE_COUNT] {
+        let [first, second, third] = self.formants;
+        [
+            Some(first),
+            Some(second),
+            Some(third),
+            self.low,
+            self.body,
+            self.upper,
+        ]
+    }
+}
+
+struct Resonance {
+    sections: [Biquad<f32>; 2],
+    gain: Smooth,
+}
+
+impl Resonance {
+    fn new(rate: f32) -> Self {
+        Self {
+            sections: std::array::from_fn(|_| {
+                Biquad::with_coefs(formant_filter(rate, 400.0, 50.0))
+            }),
+            gain: Smooth::new(0.0, 0.005, rate),
+        }
+    }
+
+    fn control(
+        &mut self,
+        from: Option<Formant>,
+        to: Option<Formant>,
+        transition: f32,
+        frequency_scale: f32,
+        rate: f32,
+        lowpass: &LowPass,
+    ) {
+        let (formant, amplitude) = match (from, to) {
+            (Some(from), Some(to)) => (from.interpolate(to, transition), 1.0),
+            (Some(from), None) => (from, 1.0 - transition),
+            (None, Some(to)) => (to, transition),
+            (None, None) => {
+                self.gain.target(0.0);
+                return;
+            }
+        };
+        let hz = (formant.frequency_hz * frequency_scale).min(rate * 0.42);
+        let bandwidth = formant.bandwidth_hz * hz / formant.frequency_hz;
+        let coefs = formant_filter(rate, hz, bandwidth);
+        for section in &mut self.sections {
+            section.set_coefs(coefs);
+        }
+        // Correct source tilt and output attenuation once for the complete
+        // branch. Two sections keep its skirts out of neighboring valleys.
+        let gain = amplitude * 10.0_f32.powf(formant.peak_db / 20.0) * (hz / 1000.0).sqrt()
+            / lowpass.magnitude_at(hz);
+        self.gain.target(gain);
+    }
+
+    fn tick(&mut self, excitation: f32) -> f32 {
+        let filtered = self
+            .sections
+            .iter_mut()
+            .fold(excitation, |sample, section| {
+                section.tick(&[sample].into())[0]
+            });
+        filtered * self.gain.tick()
+    }
 }
 
 impl Vowel {
-    // English-whisper means from Sharifzadeh et al., Tables 1/2. AY onset and
-    // schwa are design blends. Bandwidths/peak targets are engineering settings,
-    // not population norms; see sound-design-research.md.
-    fn formants(self, profile: WhisperProfile) -> [Formant; 3] {
+    // A and rounded vowels follow the reference's spectral envelope; other
+    // centers retain English-whisper anchors. These are synthesis settings,
+    // not demographic measurements; see demonic-voices-research.md.
+    fn shape(self, profile: VoiceProfile) -> VocalShape {
         let hz = match (self, profile) {
-            (Self::A, WhisperProfile::Male) => [878.0, 1294.0, 2628.0],
-            (Self::A, WhisperProfile::Female) => [966.0, 1346.0, 2950.0],
-            (Self::E, WhisperProfile::Male) => [623.0, 2183.5, 2848.0],
-            (Self::E, WhisperProfile::Female) => [674.5, 2489.5, 3123.0],
-            (Self::I, WhisperProfile::Male) => [495.0, 2412.0, 2979.0],
-            (Self::I, WhisperProfile::Female) => [511.0, 2738.0, 3239.0],
-            (Self::O, WhisperProfile::Male) => [601.0, 1035.0, 2550.0],
-            (Self::O, WhisperProfile::Female) => [579.0, 1056.0, 2928.0],
-            (Self::U, WhisperProfile::Male) => [653.0, 1696.0, 2583.0],
-            (Self::U, WhisperProfile::Female) => [636.0, 1772.0, 2759.0],
-            (Self::Eh, WhisperProfile::Male) => [751.0, 1955.0, 2717.0],
-            (Self::Eh, WhisperProfile::Female) => [838.0, 2241.0, 3007.0],
-            (Self::Uh, WhisperProfile::Male) => [756.0, 1328.0, 2639.0],
-            (Self::Uh, WhisperProfile::Female) => [949.0, 1532.0, 2844.0],
-            (Self::Schwa, WhisperProfile::Male) => [758.0, 1485.5, 2660.5],
-            (Self::Schwa, WhisperProfile::Female) => [927.0, 1653.0, 2870.5],
+            (Self::A, VoiceProfile::Low) => [820.0, 1190.0, 2540.0],
+            (Self::A, VoiceProfile::High) => [840.0, 1220.0, 2600.0],
+            (Self::E, VoiceProfile::Low) => [623.0, 2183.5, 2848.0],
+            (Self::E, VoiceProfile::High) => [674.5, 2489.5, 3123.0],
+            (Self::I, VoiceProfile::Low) => [495.0, 2412.0, 2979.0],
+            (Self::I, VoiceProfile::High) => [511.0, 2738.0, 3239.0],
+            (Self::O, VoiceProfile::Low) => [365.0, 780.0, 2370.0],
+            (Self::O, VoiceProfile::High) => [385.0, 805.0, 2420.0],
+            (Self::U, VoiceProfile::Low) => [345.0, 730.0, 2320.0],
+            (Self::U, VoiceProfile::High) => [365.0, 760.0, 2370.0],
+            (Self::Eh, VoiceProfile::Low) => [751.0, 1955.0, 2717.0],
+            (Self::Eh, VoiceProfile::High) => [838.0, 2241.0, 3007.0],
+            (Self::Uh, VoiceProfile::Low) => [756.0, 1328.0, 2639.0],
+            (Self::Uh, VoiceProfile::High) => [949.0, 1532.0, 2844.0],
+            (Self::Schwa, VoiceProfile::Low) => [758.0, 1485.5, 2660.5],
+            (Self::Schwa, VoiceProfile::High) => [927.0, 1653.0, 2870.5],
         };
-        formants(hz, [200.0, 150.0, 175.0], [12.0, -4.0, -12.0])
+        match self {
+            Self::A => VocalShape::new(hz, [110.0, 100.0, 513.0], [13.0, 2.5, -3.6])
+                .with_low(Formant::new(134.0, 222.0, -2.0))
+                .with_body(Formant::new(725.0, 262.0, -5.7))
+                .with_upper(Formant::new(3090.0, 353.0, -4.6)),
+            Self::O => VocalShape::new(hz, [130.0, 69.0, 256.0], [12.0, -4.0, -33.0])
+                .with_body(Formant::new(2800.0, 1756.0, -27.0))
+                .with_upper(Formant::new(2720.0, 232.0, -27.1)),
+            Self::U => VocalShape::new(hz, [120.0, 65.0, 250.0], [12.0, -5.0, -34.0])
+                .with_body(Formant::new(2740.0, 1650.0, -28.0))
+                .with_upper(Formant::new(2660.0, 225.0, -28.0)),
+            Self::E | Self::I => VocalShape::new(hz, [140.0, 160.0, 190.0], [12.0, 2.0, -5.0]),
+            Self::Eh | Self::Uh | Self::Schwa => {
+                VocalShape::new(hz, [150.0, 180.0, 220.0], [12.0, 1.0, -6.0])
+            }
+        }
     }
 }
 
@@ -132,9 +253,9 @@ impl Phone {
         }
     }
 
-    fn formants(self, profile: WhisperProfile) -> [Formant; 3] {
+    fn shape(self, profile: VoiceProfile) -> VocalShape {
         let (hz, bandwidths) = match self {
-            Self::Vowel(vowel) => return vowel.formants(profile),
+            Self::Vowel(vowel) => return vowel.shape(profile),
             Self::LabialStop => ([400.0, 900.0, 2100.0], [150.0, 300.0, 450.0]),
             Self::AlveolarStop | Self::Sibilant => {
                 ([3500.0, 4500.0, 5500.0], [500.0, 700.0, 900.0])
@@ -145,10 +266,10 @@ impl Phone {
             Self::Lateral => ([400.0, 1100.0, 2600.0], [60.0, 100.0, 120.0]),
             Self::Nasal => ([250.0, 1200.0, 2100.0], [80.0, 120.0, 140.0]),
             Self::Rhotic => ([450.0, 1100.0, 1600.0], [70.0, 100.0, 120.0]),
-            Self::PalatalGlide => return Vowel::I.formants(profile),
-            Self::LabialGlide => return Vowel::U.formants(profile),
+            Self::PalatalGlide => return Vowel::I.shape(profile),
+            Self::LabialGlide => return Vowel::U.shape(profile),
         };
-        formants(hz, bandwidths, [0.0, -6.0, -12.0])
+        VocalShape::new(hz, bandwidths, [0.0, -6.0, -12.0])
     }
 }
 
@@ -265,12 +386,11 @@ enum Delivery {
 struct Voice {
     phones: &'static [Phone],
     phone_weight: f32,
-    profile: WhisperProfile,
+    profile: VoiceProfile,
     age: u32,
     duration: u32,
     excitation: Excitation,
-    filters: [Biquad<f32>; 3],
-    formant_gains: [Smooth; 3],
+    resonances: [Resonance; RESONANCE_COUNT],
     lowpass: LowPass,
     frication: HighPass,
     mutation: f32,
@@ -295,15 +415,14 @@ impl Voice {
             phones,
             phone_weight: phones.iter().map(|phone| phone.weight()).sum(),
             profile: if rng.bool() {
-                WhisperProfile::Male
+                VoiceProfile::Low
             } else {
-                WhisperProfile::Female
+                VoiceProfile::High
             },
             age: 0,
             duration: ((0.4 + rng.f32() * 6.6) * rate).round() as u32,
             excitation: Excitation::new(rate, rng),
-            filters: std::array::from_fn(|_| Biquad::with_coefs(formant_filter(rate, 400.0, 50.0))),
-            formant_gains: std::array::from_fn(|_| Smooth::new(0.0, 0.005, rate)),
+            resonances: std::array::from_fn(|_| Resonance::new(rate)),
             lowpass: LowPass::new(rate, 6200.0),
             frication: HighPass::new(rate, (rate * 0.35).min(2800.0)),
             mutation: if rng.f32() < 0.25 {
@@ -337,23 +456,23 @@ impl Voice {
         }
         let phone = self.phones[index];
         let t = ((position - start) / phone.weight()).clamp(0.0, 1.0);
-        let from = phone.formants(self.profile);
-        let to = self.phones[(index + 1).min(self.phones.len() - 1)].formants(self.profile);
+        let from = phone.shape(self.profile);
+        let to = self.phones[(index + 1).min(self.phones.len() - 1)].shape(self.profile);
         let phone_seconds = self.duration as f32 / rate * phone.weight() / self.phone_weight;
         let transition = formant_transition(t, phone_seconds);
         let progress = self.age as f32 / self.duration as f32;
         // An excursion returns to the original voice, never exceeding +/-33%.
         let excursion = 4.0 * progress * (1.0 - progress);
-        for i in 0..3 {
-            let formant = from[i].interpolate(to[i], transition);
-            let hz = (formant.frequency_hz * (1.0 + self.mutation * excursion)).min(rate * 0.42);
-            let bandwidth = formant.bandwidth_hz * hz / formant.frequency_hz;
-            self.filters[i].set_coefs(formant_filter(rate, hz, bandwidth));
-            // Compensate the pink source's 1/f power tilt for comparable spectral
-            // peaks, then account for the actual output band's attenuation.
-            let output_gain = self.lowpass.magnitude_at(hz);
-            let gain = 10.0_f32.powf(formant.peak_db / 20.0) * (hz / 1000.0).sqrt() / output_gain;
-            self.formant_gains[i].target(gain);
+        for ((resonance, from), to) in self.resonances.iter_mut().zip(from.bands()).zip(to.bands())
+        {
+            resonance.control(
+                from,
+                to,
+                transition,
+                1.0 + self.mutation * excursion,
+                rate,
+                &self.lowpass,
+            );
         }
         self.phone_gain = match phone {
             Phone::LabialStop | Phone::AlveolarStop | Phone::VelarStop => {
@@ -383,10 +502,9 @@ impl Voice {
         let white = rng.f32() * 2.0 - 1.0;
         let excitation = self.excitation.tick(white, table);
         let formants: f32 = self
-            .filters
+            .resonances
             .iter_mut()
-            .zip(&mut self.formant_gains)
-            .map(|(filter, gain)| filter.tick(&[excitation].into())[0] * gain.tick())
+            .map(|resonance| resonance.tick(excitation))
             .sum();
         let seconds = self.age as f32 / rate;
         let left = (self.duration - self.age) as f32 / rate;
@@ -608,109 +726,160 @@ mod tests {
         power
     }
 
-    #[test]
-    fn whisper_vowels_keep_the_first_formant_stronger_across_profiles_and_excitation_pitches() {
-        const VOWELS: [(&str, Vowel, &[Phone]); 4] = [
-            ("I", Vowel::I, &[Phone::Vowel(Vowel::I)]),
-            ("A", Vowel::A, &[Phone::Vowel(Vowel::A)]),
-            ("U", Vowel::U, &[Phone::Vowel(Vowel::U)]),
-            ("O", Vowel::O, &[Phone::Vowel(Vowel::O)]),
-        ];
-        let rate = 48_000.0;
-        let table = SineTable::new();
+    fn spectral_band(power: &[f64], rate: f32, low_hz: f32, high_hz: f32) -> &[f64] {
         let bin_hz = rate / FFT_LEN as f32;
+        let first = (low_hz / bin_hz).ceil() as usize;
+        let end = (high_hz / bin_hz).ceil() as usize;
+        &power[first..end.min(power.len())]
+    }
+
+    fn spectral_peak(power: &[f64], rate: f32, low_hz: f32, high_hz: f32) -> (f32, f64) {
+        let bin_hz = rate / FFT_LEN as f32;
+        let radius = (20.0 / bin_hz).ceil() as usize;
+        let first = (low_hz / bin_hz).ceil() as usize;
+        let end = (high_hz / bin_hz).ceil() as usize;
+        (first..end)
+            .map(|center| {
+                let band = &power[center - radius..=center + radius];
+                (
+                    center as f32 * bin_hz,
+                    band.iter().sum::<f64>() / band.len() as f64,
+                )
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap()
+    }
+
+    fn spectral_width(power: &[f64], rate: f32, peak_hz: f32) -> f32 {
+        let bin_hz = rate / FFT_LEN as f32;
+        let radius = (20.0 / bin_hz).ceil() as usize;
+        let mean = |center| {
+            let band = &power[center - radius..=center + radius];
+            band.iter().sum::<f64>() / band.len() as f64
+        };
+        let peak = (peak_hz / bin_hz).round() as usize;
+        let half = mean(peak) * 0.5;
+        let lower = (radius..peak).rfind(|&bin| mean(bin) < half).unwrap();
+        let upper = (peak + 1..power.len() - radius)
+            .find(|&bin| mean(bin) < half)
+            .unwrap();
+        (upper - lower) as f32 * bin_hz
+    }
+
+    #[test]
+    fn rounded_and_open_vowels_keep_reference_envelopes_and_supporting_resonances() {
+        let table = SineTable::new();
         let hann: Vec<_> = (0..FFT_LEN)
             .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / (FFT_LEN - 1) as f32).cos())
             .collect();
-        let mut f2_range = [f64::INFINITY, f64::NEG_INFINITY];
-        let mut f3_range = f2_range;
-        for (profile_name, profile) in [
-            ("male", WhisperProfile::Male),
-            ("female", WhisperProfile::Female),
+        for (rate, profile, seed, sine_hz) in [
+            (8_000.0, VoiceProfile::Low, 11, 30.0),
+            (48_000.0, VoiceProfile::Low, 123, 70.0),
+            (48_000.0, VoiceProfile::High, 90_210, 110.0),
+            (192_000.0, VoiceProfile::High, 123, 30.0),
         ] {
-            for (vowel_name, vowel, phones) in VOWELS {
-                let formants = vowel.formants(profile);
-                for sine_hz in [30.0, 70.0, 110.0] {
-                    for seed in [11, 123, 90_210] {
-                        let mut rng = fastrand::Rng::with_seed(seed);
-                        let mut voice = Voice::new(rate, VoiceKind::Murmur, b'E', &mut rng);
-                        voice.profile = profile;
-                        voice.phones = phones;
-                        voice.phone_weight = 1.0;
-                        voice.mutation = 0.0;
-                        voice.duration = (rate * 3.0) as u32;
-                        voice.excitation.sine = Osc::new(sine_hz, rate, 0.0);
-                        for _ in 0..rate as u32 / 2 {
-                            voice.tick(rate, &table, &mut rng);
-                        }
-                        let samples: Vec<_> = (0..rate as u32 * 2)
-                            .map(|_| voice.tick(rate, &table, &mut rng))
-                            .collect();
-                        assert!(samples.iter().all(|sample| sample.is_finite()));
-                        let power = averaged_spectrum(&samples, &hann);
-                        let clean: Vec<_> = (0..power.len())
-                            .map(|i| {
-                                let hz = i as f32 * bin_hz;
-                                // A two-bin guard excludes the Hann main lobe of each
-                                // coherent harmonic while retaining the noise envelope.
-                                (hz - (hz / sine_hz).round() * sine_hz).abs() > bin_hz * 2.0
-                            })
-                            .collect();
-                        let peaks = formants.map(|formant| {
-                            let first = ((formant.frequency_hz - formant.bandwidth_hz * 0.5)
-                                / bin_hz)
-                                .ceil() as usize;
-                            let last = ((formant.frequency_hz + formant.bandwidth_hz * 0.5)
-                                / bin_hz)
-                                .floor() as usize;
-                            let radius = (15.0 / bin_hz).round() as usize;
-                            (first..=last)
-                                .map(|center| {
-                                    let mut sum = 0.0;
-                                    let mut count = 0;
-                                    for bin in center - radius..=center + radius {
-                                        if clean[bin] {
-                                            sum += power[bin];
-                                            count += 1;
-                                        }
-                                    }
-                                    assert!(count > 0);
-                                    sum / f64::from(count)
-                                })
-                                .fold(0.0_f64, f64::max)
-                        });
-                        let f2 = 10.0 * (peaks[1] / peaks[0]).log10();
-                        let f3 = 10.0 * (peaks[2] / peaks[0]).log10();
-                        // Nearby OH resonances overlap, reducing the peak difference
-                        // from the nominal 6 dB branch-level separation.
-                        assert!(
-                            (-9.0..=-2.5).contains(&f2),
-                            "{profile_name} {vowel_name}, sine {sine_hz}, seed {seed}: F2/F1 {f2:.2} dB"
-                        );
-                        assert!(
-                            (-12.0..=-6.0).contains(&f3),
-                            "{profile_name} {vowel_name}, sine {sine_hz}, seed {seed}: F3/F1 {f3:.2} dB"
-                        );
-                        f2_range = [f2_range[0].min(f2), f2_range[1].max(f2)];
-                        f3_range = [f3_range[0].min(f3), f3_range[1].max(f3)];
-                        if sine_hz == 110.0 && seed == 123 {
-                            eprintln!(
-                                "{profile_name} {vowel_name}: F2/F1 {f2:.2} dB, F3/F1 {f3:.2} dB"
-                            );
-                        }
-                    }
+            let render = |phones| {
+                let mut rng = fastrand::Rng::with_seed(seed);
+                let mut voice = Voice::new(rate, VoiceKind::Murmur, b'E', &mut rng);
+                voice.profile = profile;
+                voice.phones = phones;
+                voice.phone_weight = 1.0;
+                voice.mutation = 0.0;
+                let warmup = (rate * 0.3) as u32;
+                let sample_count = ((rate * 2.0) as usize).max(FFT_LEN * 2);
+                voice.duration = warmup + sample_count as u32 + (rate * 0.2) as u32;
+                voice.excitation.sine = Osc::new(sine_hz, rate, 0.0);
+                for _ in 0..warmup {
+                    voice.tick(rate, &table, &mut rng);
                 }
-            }
+                let samples: Vec<_> = (0..sample_count)
+                    .map(|_| voice.tick(rate, &table, &mut rng))
+                    .collect();
+                assert!(samples.iter().all(|sample| sample.is_finite()));
+                averaged_spectrum(&samples, &hann)
+            };
+            let rounded = render(&[Phone::Vowel(Vowel::O)]);
+            let open = render(&[Phone::Vowel(Vowel::A)]);
+            let share = |power: &[f64], low, high| {
+                spectral_band(power, rate, low, high).iter().sum::<f64>()
+                    / power.iter().sum::<f64>()
+            };
+            let mean = |power: &[f64], low, high| {
+                let band = spectral_band(power, rate, low, high);
+                band.iter().sum::<f64>() / band.len() as f64
+            };
+            let rounded_main = spectral_peak(&rounded, rate, 250.0, 600.0);
+            let open_main = spectral_peak(&open, rate, 650.0, 1000.0);
+            let rounded_upper = share(&rounded, 2000.0, 4000.0);
+            let open_upper = share(&open, 2000.0, 4000.0);
+            let rounded_width = spectral_width(&rounded, rate, rounded_main.0);
+            let open_width = spectral_width(&open, rate, open_main.0);
+            assert!(
+                (320.0..440.0).contains(&rounded_main.0),
+                "{rate} Hz seed {seed}: rounded peak {}",
+                rounded_main.0
+            );
+            assert!(
+                (760.0..920.0).contains(&open_main.0),
+                "{rate} Hz seed {seed}: open peak {}",
+                open_main.0
+            );
+            assert!(share(&rounded, 250.0, 600.0) > 0.90);
+            assert!(share(&open, 600.0, 1200.0) > 0.65);
+            assert!(
+                (60.0..160.0).contains(&rounded_width),
+                "{rate} Hz seed {seed}: rounded width {rounded_width}"
+            );
+            assert!(
+                (45.0..150.0).contains(&open_width),
+                "{rate} Hz seed {seed}: open width {open_width}"
+            );
+            assert!(
+                (0.0003..0.006).contains(&rounded_upper),
+                "{rate} Hz seed {seed}: rounded upper {rounded_upper}"
+            );
+            assert!(
+                (0.04..0.22).contains(&open_upper),
+                "{rate} Hz seed {seed}: open upper {open_upper}"
+            );
+            assert!(open_upper > rounded_upper * 15.0);
+
+            let rounded_second = spectral_peak(&rounded, rate, 700.0, 900.0).1;
+            let second_db = 10.0 * (rounded_second / rounded_main.1).log10();
+            assert!(
+                (-26.0..-12.0).contains(&second_db),
+                "{rate} Hz seed {seed}: rounded secondary {second_db} dB"
+            );
+            let first_upper = spectral_peak(&rounded, rate, 2200.0, 2500.0).1;
+            let second_upper = spectral_peak(&rounded, rate, 2600.0, 2850.0).1;
+            let bridge = mean(&rounded, 2470.0, 2590.0);
+            let valley = mean(&rounded, 1400.0, 1800.0);
+            eprintln!(
+                "{rate} Hz seed {seed}: O/A peaks {:.1}/{:.1} Hz, widths {rounded_width:.1}/{open_width:.1} Hz, upper shares {rounded_upper:.5}/{open_upper:.5}, secondary {second_db:.1} dB, bridge/valley {:.2}",
+                rounded_main.0,
+                open_main.0,
+                bridge / valley
+            );
+            assert!(
+                bridge > valley,
+                "{rate} Hz seed {seed}: bridge/valley {}",
+                bridge / valley
+            );
+            assert!(bridge > first_upper.max(second_upper) * 0.06);
+            assert!(second_upper > rounded_main.1 * 0.00003);
+
+            let open_upper_peak = spectral_peak(&open, rate, 2400.0, 2800.0).1;
+            let open_support = spectral_peak(&open, rate, 2950.0, 3300.0).1;
+            assert!((0.2..2.0).contains(&(open_support / open_upper_peak)));
         }
-        eprintln!("whisper F2/F1 range {f2_range:?} dB; F3/F1 range {f3_range:?} dB");
     }
 
     #[test]
     fn vowel_morphs_hold_the_source_until_the_last_30_ms_of_each_phone() {
         let table = SineTable::new();
-        let profile = WhisperProfile::Male;
-        let from = Vowel::E.formants(profile);
-        let to = Vowel::I.formants(profile);
+        let profile = VoiceProfile::Low;
+        let from = Vowel::A.shape(profile).formants;
+        let to = Vowel::I.shape(profile).formants;
         let halfway: [Formant; 3] = std::array::from_fn(|i| Formant {
             frequency_hz: (from[i].frequency_hz + to[i].frequency_hz) * 0.5,
             bandwidth_hz: (from[i].bandwidth_hz + to[i].bandwidth_hz) * 0.5,
@@ -720,15 +889,15 @@ mod tests {
             for seconds in [0.4, 7.0] {
                 let mut rng = fastrand::Rng::with_seed(123);
                 let mut reference_rng = fastrand::Rng::with_seed(123);
-                let mut voice = Voice::new(rate, VoiceKind::Murmur, b'A', &mut rng);
-                let mut reference = Voice::new(rate, VoiceKind::Murmur, b'A', &mut reference_rng);
+                let mut voice = Voice::new(rate, VoiceKind::Murmur, b'I', &mut rng);
+                let mut reference = Voice::new(rate, VoiceKind::Murmur, b'I', &mut reference_rng);
                 let duration = (rate * seconds).round() as u32;
                 for item in [&mut voice, &mut reference] {
                     item.profile = profile;
                     item.mutation = 0.0;
                     item.duration = duration;
                 }
-                reference.phones = &[Phone::Vowel(Vowel::E)];
+                reference.phones = &[Phone::Vowel(Vowel::A)];
                 reference.phone_weight = 1.0;
                 let boundary = duration / 2;
                 let transition_start = boundary - (rate * 0.030).round() as u32;
@@ -746,25 +915,27 @@ mod tests {
                 ] {
                     voice.age = age;
                     voice.control(rate);
-                    for (filter, formant) in voice.filters.iter().zip(expected) {
-                        let actual = filter.coefs();
+                    for (resonance, formant) in voice.resonances.iter().zip(expected) {
                         let expected =
                             formant_filter(rate, formant.frequency_hz, formant.bandwidth_hz);
-                        for (actual, expected) in
-                            [actual.a1, actual.a2, actual.b0, actual.b1, actual.b2]
-                                .into_iter()
-                                .zip([
-                                    expected.a1,
-                                    expected.a2,
-                                    expected.b0,
-                                    expected.b1,
-                                    expected.b2,
-                                ])
-                        {
-                            assert!(
-                                (actual - expected).abs() < 1e-5,
-                                "{rate} Hz, {seconds}s at {age}: {actual} vs {expected}"
-                            );
+                        for filter in &resonance.sections {
+                            let actual = filter.coefs();
+                            for (actual, expected) in
+                                [actual.a1, actual.a2, actual.b0, actual.b1, actual.b2]
+                                    .into_iter()
+                                    .zip([
+                                        expected.a1,
+                                        expected.a2,
+                                        expected.b0,
+                                        expected.b1,
+                                        expected.b2,
+                                    ])
+                            {
+                                assert!(
+                                    (actual - expected).abs() < 1e-5,
+                                    "{rate} Hz, {seconds}s at {age}: {actual} vs {expected}"
+                                );
+                            }
                         }
                     }
                     assert_eq!(voice.duration, duration);
@@ -841,13 +1012,13 @@ mod tests {
     }
 
     #[test]
-    fn noise_vowels_place_energy_at_the_researched_formants() {
+    fn front_and_rounded_vowels_keep_distinct_articulations() {
         let rate = 48_000.0;
         let table = SineTable::new();
         let render = |letter| {
             let mut rng = fastrand::Rng::with_seed(123);
             let mut voice = Voice::new(rate, VoiceKind::Murmur, letter, &mut rng);
-            voice.profile = WhisperProfile::Male;
+            voice.profile = VoiceProfile::Low;
             voice.mutation = 0.0;
             // Use sustained vowels so consonant gestures cannot mask the formants.
             voice.phones = if letter == b'E' {
@@ -870,7 +1041,7 @@ mod tests {
         let front = render(b'E');
         let back = render(b'U');
         assert!(band_power(&front, 2412.0, rate) > band_power(&back, 2412.0, rate) * 3.0);
-        assert!(band_power(&back, 1696.0, rate) > band_power(&front, 1696.0, rate) * 3.0);
+        assert!(band_power(&back, 350.0, rate) > band_power(&front, 350.0, rate) * 3.0);
         let rms =
             (front.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / front.len() as f64).sqrt();
         assert!((0.001..0.012).contains(&rms), "voice RMS {rms}");

@@ -445,12 +445,13 @@ an artistic vocal-tract-size approximation, not a complete speaker model.
 The Praat reference dataset retains separate man, woman, and child categories
 and the first three formants of ten American-English monophthongs. A child
 voice should use measured vowel-specific presets rather than an assumed
-universal multiplier. The adult speaker profiles below need no child model.
+universal multiplier. These measurements do not establish a child preset
+for this effect.
 [Praat: Peterson and Barney formant table](https://www.fon.hum.uva.nl/praat/manual/Create_formant_table__Peterson___Barney_1952_.html)
 
-Use a parallel bank of second-order band-pass resonators, with explicit
-center frequency and half-power bandwidth. Normalize filter response and
-balance the resulting voice level after excitation coloring. Csound's
+Resonator settings need explicit center frequency, bandwidth, and level.
+Normalize filter response and balance the resulting voice level after
+excitation coloring. Csound's
 resonator documentation distinguishes peak normalization from white-noise
 RMS normalization. [Csound: reson](https://csound.com/docs/manual/reson.html)
 
@@ -477,8 +478,9 @@ bandwidth, and peak-level targets move smoothly to the next phone in the last
 30 ms at most. For very short phones the transition window is capped at 55%
 of that phone's duration. Consonant slots also shape the noise and amplitude.
 AY means E->I, EYE means AH->I, OH means O->U, EH means the vowel in head,
-UH means the vowel in hud, and schwa is a reduced central vowel. The whispered
-vowel profiles and the explicit AY-onset/schwa blends are specified below.
+UH means the vowel in hud, and schwa is a reduced central vowel. The source
+measurements, AY-onset/schwa blends, and reference-shaped vowels are described
+below.
 
 | Letters | Phone skeletons |
 | --- | --- |
@@ -508,7 +510,7 @@ or all the other EE-ending letter names. /l,r,w,y/ additionally need their
 own resonant transitions. [Macquarie: Sound sources](https://www.mq.edu.au/faculty-of-medicine-health-and-human-sciences/departments-and-schools/department-of-linguistics/our-research/phonetics-and-phonology/speech/acoustics/acoustic-theory-of-speech-production/sound-sources-in-the-vocal-tract),
 [Approximants](https://www.mq.edu.au/faculty-of-medicine-health-and-human-sciences/departments-and-schools/department-of-linguistics/our-research/phonetics-and-phonology/speech/acoustics/speech-acoustics/approximants)
 
-The requested occasional 0.67..1.33 formant multiplier is an effect setting,
+The occasional 0.67..1.33 formant multiplier is an effect setting,
 not a phonetic norm. Apply it continuously to the current vowel trajectory,
 keep frequency order and valid sample-rate limits, and preserve the seeded
 trajectory over an utterance. Two preallocated voices can alternate ticker
@@ -522,8 +524,10 @@ gain targets change over
 
 Research checked 2026-11-05. Singing presets above are not whisper
 measurements. The F1/F2/F3 means below are Hz from five men and five women
-speaking Birmingham/West Midlands English. Whispered F2 was often comparable
-to F1; no universal A1/A2/A3 ratio is established.
+speaking Birmingham/West Midlands English. These are source measurements;
+the current synthesis settings also incorporate the supplied demonic voice
+reference. Whispered F2 was often comparable to F1; no universal A1/A2/A3
+ratio is established.
 [Sharifzadeh et al., 2012: original author-hosted paper](https://lintech.org/webpapers/JVoice3Revised1.pdf)
 
 | Target | Male F1/F2/F3 | Female F1/F2/F3 |
@@ -556,14 +560,10 @@ This supports preferential F1 broadening and cautions against applying the
 same factor to every band. It is not an English per-vowel bandwidth table.
 [Study of the formant and duration in Chinese whispered vowel speech, 2016](https://doi.org/10.1016/j.apacoust.2016.08.007)
 
-For this palette, B1/B2/B3 = 200/150/175 Hz is an explicit design starting
-point, informed by broader low resonances rather than copied as a measured
-English norm. The frequently reproduced Serbian bandwidth table attributed
-to Jovicic (1998) could not be checked against its original full text during
-this research; its exact numbers are not used as verified measurements here.
-Matsuda, Mori, and Kasuya's perceptual study independently associates
-whisper naturalness with lower-formant bandwidth and spectral tilt, supporting
-assessment of both controls together.
+Bandwidths and relative levels in this effect are vowel-specific design
+settings rather than measured English norms. Matsuda, Mori, and Kasuya's
+perceptual study associates whisper naturalness with lower-formant bandwidth
+and spectral tilt, supporting assessment of both controls together.
 [Matsuda et al., 1999: Perception of Naturalness and Vowel Categories of Whispered Vowels](https://doi.org/10.24467/onseikenkyu.3.3_67)
 
 Filter topology changes amplitude relationships. Klatt's vowel cascade uses
@@ -577,18 +577,39 @@ source tilt and the overlapping resonator skirts. A filter's peak gain is
 not the resulting acoustic formant level.
 [Klatt, 1980, pp. 980-982: original paper](https://www.source-code.biz/klattSyn/Klatt-1980.pdf)
 
-The implementation retains a bounded parallel bank with peak-normalized
-second-order band-pass filters. Vowels and vowel-like glides use nominal
-noise-envelope targets of 12/-4/-12 dB at F1/F2/F3. The first-formant
-emphasis is the artistic compensation for background masking;
-these targets are not measured whisper ratios. Consonant noise bands use
-0/-6/-12 dB targets. A square-root frequency correction compensates the ideal
-pink source's nominal power slope; branch-gain calibration also accounts for
-the 6200 Hz output low-pass response.
-Because soft clipping, the added sine, and overlapping filters alter
-that ideal spectrum, validate the resulting spectral envelope over sustained
-vowels, several seeds, and sample rates. Compare smoothed formant peak
-levels, not individual FFT bins or equal integrated band energy.
+The current Low and High profiles are synthesis variants, not demographic
+speaker models. A, O, and U use reference-shaped spectral envelopes; the
+other vowel centers retain the English-whisper anchors above, including the
+AY-onset and schwa blends. Their bandwidths and relative levels are tuned
+per vowel. The rounded vowels emphasize a low, narrow principal resonance
+with weak upper detail; A retains stronger upper structure.
+[Demonic voices: reference analysis and tuning](demonic-voices-research.md)
+
+Each `VocalShape` has three principal formants and optional low, body, and
+upper bands. These support low-frequency texture, small resonances, and broad
+shoulders between peaks without adding an unfiltered noise floor. Every
+active branch uses two cascaded, peak-normalized second-order bandpasses.
+The nominal bandwidth parameter applies to each section and approximates
+its half-power width for narrow bands. Broad-band peak positions and widths
+need calibration against the actual response. The combined branch is
+narrower and has steeper skirts. All six branch slots and their filter states
+are bounded and preallocated. Consonant shapes use three principal bands
+with 0/-6/-12 dB targets.
+
+Frequency, section bandwidth, and peak targets interpolate within the final
+30 ms of each phone, capped at 55% of very short phones. An optional band
+that exists at only one endpoint keeps that endpoint's frequency and width
+and fades in linear amplitude through the same transition. Branch gains
+smooth over 5 ms. A square-root frequency correction compensates the ideal
+pink source's nominal power slope; branch calibration also accounts for the
+6200 Hz output low-pass response once for the complete branch.
+
+Soft clipping, the added sine, and coherent overlap between branches alter
+that ideal spectrum. Validate the resulting spectral envelope over sustained
+vowels, several seeds, and sample rates. Compare smoothed peaks, valleys,
+and integrated regional power while keeping overall level separate from
+spectral shape. Branch gain values are not measured acoustic formant levels.
+Demonic voices and stutters both default to 0%.
 
 Whisper synthesis can additionally reduce low-frequency energy. Park et al.'s
 stimulus method re-excites an estimated envelope with noise, attenuates energy
@@ -596,8 +617,8 @@ below 250 Hz, and emphasizes the region around 2 kHz. This is a documented
 breathy-voice stimulus method, not a mandatory natural-whisper filter.
 [Park et al., 2020, Methods: original author-hosted paper](https://sites.bu.edu/stepplab/files/2020/11/2020_JSLHR-20-00294.pdf)
 
-Preserve the requested pink-noise soft clip, 30..110 Hz sine at 0.1, +6 dB
-drive, and second soft clip before both formant and frication paths. The
+The excitation soft-clips pink noise, adds a 30..110 Hz sine at 0.1 amplitude,
+applies +6 dB drive, and soft-clips again before the formant and frication paths. The
 periodic component makes this a hybrid demonic voice informed by whisper
 measurements, rather than a physiological pure whisper. Keep source gain,
 spectral shaping, formant balance, and final mix level distinct when
