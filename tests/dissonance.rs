@@ -31,9 +31,9 @@ fn advance(renderer: &mut Renderer, mut frames: usize) {
 }
 
 #[test]
-fn diatonic_harmony_remains_the_default_with_its_existing_ticker_voicings() {
+fn dissonant_harmony_is_the_default_and_diatonic_voicings_remain_selectable() {
     let defaults = RenderConfig::default();
-    assert_eq!(defaults.harmony_mode, HarmonyMode::Diatonic);
+    assert_eq!(defaults.harmony_mode, HarmonyMode::Dissonant);
     for (ticker, notes) in [
         ("AAPL", [50, 53, 60, 64]),
         ("TSLA", [50, 53, 60, 64]),
@@ -47,17 +47,28 @@ fn diatonic_harmony_remains_the_default_with_its_existing_ticker_voicings() {
         };
         let mut default = Renderer::new(implicit).unwrap();
         let mut explicit = Renderer::new(RenderConfig {
-            harmony_mode: HarmonyMode::Diatonic,
+            harmony_mode: HarmonyMode::Dissonant,
             ..implicit
         })
         .unwrap();
         let snapshot = default.snapshot();
         assert_eq!(
             snapshot.chord,
+            Chord::from_symbol(symbol, HarmonyMode::Dissonant)
+        );
+        assert_eq!(snapshot.background.harmony.mode, HarmonyMode::Dissonant);
+        let diatonic = Renderer::new(RenderConfig {
+            harmony_mode: HarmonyMode::Diatonic,
+            ..implicit
+        })
+        .unwrap()
+        .snapshot();
+        assert_eq!(
+            diatonic.chord,
             Chord::new(symbol.root(), ChordShape::MinorNinth)
         );
-        assert_eq!(snapshot.chord.notes(), notes);
-        assert_eq!(snapshot.background.harmony.mode, HarmonyMode::Diatonic);
+        assert_eq!(diatonic.chord.notes(), notes);
+        assert_eq!(diatonic.background.harmony.mode, HarmonyMode::Diatonic);
         for _ in 0..RATE {
             assert_eq!(default.next_frame(), explicit.next_frame());
         }

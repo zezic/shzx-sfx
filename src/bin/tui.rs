@@ -805,10 +805,11 @@ impl App {
         quit
     }
 
+    /// The edit coordinate and bounds shared by keyboard, wheel, and dragging.
     fn numeric(&self, control: Control) -> Option<(f32, f32, f32)> {
         Some(match control {
             Control::Market(field) => (field.get(self.market).get(), 0.0, 1.0),
-            Control::Mix(layer) => (layer.get(self.mix).get(), 0.0, 1.0),
+            Control::Mix(layer) => (layer.get(self.mix).get().cbrt(), 0.0, 1.0),
             Control::OutputGain => (
                 self.mix.output_gain.db(),
                 OutputGain::MIN_DB,
@@ -908,7 +909,10 @@ impl App {
             }
             Control::Mix(layer) => {
                 let mut mix = self.mix;
-                layer.set(&mut mix, Unit::new(next).expect("slider is normalized"));
+                layer.set(
+                    &mut mix,
+                    Unit::new(next.powi(3)).expect("mixer position is normalized"),
+                );
                 if self.submit(Command::Mix(mix), send) && layer == MixLayer::Master && next > 0.0 {
                     self.muted_level = None;
                 }

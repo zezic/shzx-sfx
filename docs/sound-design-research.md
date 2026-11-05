@@ -244,7 +244,10 @@ the CLI before connecting it to the terminal.
 
 ## Current implementation controls
 
-In the default diatonic mode, ticker names select an anchor degree in A natural
+Ticker-derived chromatic harmony is the default, holding a fixed voicing from
+the complete normalized ticker. Its mapping is described below.
+
+In Diatonic mode, ticker names select an anchor degree in A natural
 minor through a stable hash.
 Generated upper voicings retain minor or half-diminished quality over that
 pedal; scale membership keeps sounding harmony reverb tails compatible while
@@ -643,7 +646,7 @@ spectral shaping, formant balance, and final mix level distinct when
 auditioning changes.
 
 
-## Opt-in ticker-derived chromatic harmony
+## Ticker-derived chromatic harmony
 
 `HarmonyMode::Dissonant` selects four distinct pitch classes from all twelve
 chromatic notes, using only the normalized ticker's ASCII bytes. The rule is
@@ -681,8 +684,9 @@ represents an accidental.
 
 Market data, random render seed, and elapsed time do not choose these notes.
 The harmony clock is fixed in this mode; ticker or harmony-mode commands
-crossfade through the existing pad/pedal banks. The ordinary market-driven
-A-natural-minor arrangement remains the default. CLI `--dissonance`, REPL
-`harmony dissonant`, and the Scene page's harmony selector opt into the
-chromatic mode. The Scene page also provides a mouse/keyboard grid of 24
+crossfade through the existing pad/pedal banks. This chromatic arrangement is
+the default. CLI `--harmony diatonic`, REPL `harmony diatonic`, and the Scene
+page's harmony selector choose the market-driven A-natural-minor arrangement.
+`--harmony dissonant` and `harmony dissonant` select chromatic harmony explicitly.
+The Scene page also provides a mouse/keyboard grid of 24
 tickers for comparisons, with manual ticker entry retained.

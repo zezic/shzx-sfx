@@ -1,6 +1,6 @@
 use shzx_sfx::{
-    Chord, ChordShape, ChordTransition, Command, MarketContext, Mix, Mode, Pan, RenderConfig,
-    Renderer, RootTransition, ScaleDegree, SfxEvent, SfxKind, Symbol, Trend, Unit,
+    Chord, ChordShape, ChordTransition, Command, HarmonyMode, MarketContext, Mix, Mode, Pan,
+    RenderConfig, Renderer, RootTransition, ScaleDegree, SfxEvent, SfxKind, Symbol, Trend, Unit,
 };
 
 const RATE: u32 = 8_000;
@@ -9,6 +9,7 @@ fn renderer() -> Renderer {
     Renderer::new(RenderConfig {
         sample_rate: RATE,
         seed: 123,
+        harmony_mode: HarmonyMode::Diatonic,
         ..RenderConfig::default()
     })
     .unwrap()

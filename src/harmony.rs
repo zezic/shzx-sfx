@@ -24,8 +24,8 @@ const VOICING_CEILING: u8 = 67;
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum HarmonyMode {
-    #[default]
     Diatonic,
+    #[default]
     Dissonant,
 }
 
@@ -806,7 +806,7 @@ mod tests {
                 pitch
             );
         }
-        assert_eq!(HarmonyMode::default(), HarmonyMode::Diatonic);
+        assert_eq!(HarmonyMode::default(), HarmonyMode::Dissonant);
         assert_eq!(
             serde_json::to_string(&HarmonyMode::Dissonant).unwrap(),
             "\"dissonant\""

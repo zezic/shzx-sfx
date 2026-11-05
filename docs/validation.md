@@ -446,16 +446,16 @@ verify the periodic source contributes nonlinear harmonics without exceeding
 the excitation ceiling.
 
 Stutter rate and amplitude targets change over 0.3..1.5 seconds, staying within
-3..20 Hz with rounded pulse edges. Coins contain 2..10 partials at 1..10 kHz,
-a bounded PM matrix, independent amplitude/index LFOs at 0.3..4 Hz, and separate
+3..20 Hz with rounded pulse edges. Coins contain 2..10 independent sine partials
+at 1..10 kHz, amplitude LFOs at 0.3..4 Hz, and separate
 3..7 second attack/release times. One or two partials oppose the main stereo
 group. Their stereo sum receives two Q 0.8 bell cuts: -12 dB at 3.3 kHz and
--9 dB at 9 kHz, before the dry/reverb split. Coin and laser mix gains default
-to 0.125 and 0.10. Lasers use 10..14 kHz carriers, much weaker PM, clustered
+-9 dB at 9 kHz, before the dry/reverb split. Coin and laser mix gains are
+independent controls. Lasers use 10..14 kHz carriers, weak PM, clustered
 positions,
 40..200 Hz onset shaking that decays in 100 ms, small level motion, and
-independent 50% duty amplitude pulses at seeded 3..10 Hz rates. Each partial
-begins in its on half-cycle and holds its selected rate for the formation,
+a shared 50% duty amplitude pulse at a seeded 3..10 Hz rate. All partials
+begin in the same on half-cycle and switch together throughout the formation,
 with 2 ms gain smoothing at each switch. Their source duration is 6..14 seconds.
 Unsupported high registers stay silent rather than moving into a lower band.
 
@@ -476,16 +476,17 @@ checks cover the source contracts. The allocator audit includes active new sourc
 mutations, formation starts/retirement, and reverb at 8, 48, and 192 kHz,
 with zero allocations or deallocations after construction.
 
-The broad release suite reports 170 passes and five baseline failures:
+The broad release suite reports 176 passes and five failures:
 two sub tuning assertions expect less than 0.8% detuning despite the existing
 +/-0.24-semitone spread, and two harmony assertions expect a three-second
 crossfade despite the existing half-second increment. The sub failures were
 also reproduced from an untouched HEAD archive; the unchanged timing code and
-assertions establish the other two timing mismatches. The fifth failure is
-the voice spectral regression expecting the earlier 6/0/-3 dB formant targets
-while the current source is tuned to 12/-4/-12 dB. That voice source and test
-are unchanged by the harmony feature. Formatting, all-target
-Clippy with warnings denied and the headless build pass. CLI/TUI test
+assertions establish the other two timing mismatches. The default environment's
+RMS floor test measures 0.04731 against its 0.05 floor with the current 0.35
+drone gain. Explicit Diatonic mode also falls below that floor at 0.04765;
+restoring the 0.65 drone reference measures 0.06623. These measurements use
+the test's seconds 1..3 window, before coins and lasers begin. Formatting,
+all-target Clippy with warnings denied and the headless build pass. CLI/TUI test
 coverage includes the four new gains, activity monitoring, and five reverb
 buses at 80x24 and larger sizes.
 
@@ -521,22 +522,28 @@ energy below 300 Hz and 58.31% at 300..1000 Hz; stutters place 8.29% and
 60.20% in those bands. These describe signal balance, not transcription
 accuracy.
 
-Laser amplitudes use a seeded fixed 3..10 Hz rate per partial, 50% duty, and
-2 ms edge smoothing. Endpoint tests at 8, 48, and 192 kHz measure maximum
-period error of 0.025% and duty error of 0.0187%; independent partial pulse
-patterns diverge within the tested one-second window. Rates describe full
-on/off cycles. All six tone tests, four ambient integration tests, and the
-allocation audit pass. Random choices occur at source construction, and the
+Laser amplitudes share one seeded fixed 3..10 Hz rate per formation, 50% duty,
+and 2 ms edge smoothing. The pulse belongs to the beam envelope and gates the
+summed partials before filtering. Endpoint tests at 8, 48, and 192 kHz measure
+maximum period error of 0.025% and duty error of 0.0187%. Rendered formations
+at 44.1, 48, and 192 kHz verify that all partials fade out together: across
+four seeds and three cycles at each rate endpoint, energy in the settled off
+windows stays below one ten-millionth of the on-window energy. Rates describe
+full on/off cycles. Random choices occur at source construction, and the
 pulse phase clock uses f64 to retain sample-level timing at high rates.
+All seven tone tests, four ambient integration tests, and the allocation audit
+pass. Formatting and all-target, all-feature Clippy with warnings denied pass.
 
-A fresh 30-second isolated laser export at 48 kHz, seed 123, default gain,
-and default reverb measures -48.56 dBFS peak, -62.96 dBFS full-file RMS, and
--59.00 dBFS approximate active-window RMS. All samples are finite, the largest
-sample step is 0.00534, and 99.9997% of spectral energy is at 10..14 kHz.
-In the 13..17 second window, 85.10% of measured 0.5..40 Hz amplitude-envelope
-modulation power falls at 3..10 Hz. The full WAV/JSONL and a 15-second excerpt
-starting at second 12 are in `/private/tmp/shzx-sfx-laser-pulses/`, alongside
-measurements and build provenance.
+Fresh 30-second isolated formation exports at 48 kHz, seed 123, current default
+gains and reverb measure -55.02 dBFS peak and -70.55 dBFS full-file RMS for
+coins, and -50.43/-70.08 dBFS for lasers. All samples are finite. Coins retain
+99.99999% of spectral energy at 1..10 kHz; lasers retain 99.9857% at 10..14 kHz.
+Their maximum sample steps are 0.00137 and 0.00433. The coin reverb tail at
+17.1..17.6 seconds measures -113.48 dBFS, while the dry comparison is silent;
+the laser tail at 22.1..22.6 seconds measures -118.73 dBFS. WAV/JSONL exports,
+coin dry comparison, previews, and measurements are in
+`/private/tmp/shzx-sfx-dissonant-coins/`. The repeatable export and analysis
+script is `/private/tmp/shzx-sfx-audio-update.py`.
 
 The 30-second interactive benchmark at 48 kHz, 256-frame blocks, seed 123,
 and 32 available UI voices renders in 2.211 seconds (7.369% of realtime wall
@@ -547,8 +554,9 @@ and callback scheduling were not measured for this revision.
 
 ## Ticker chromatic harmony and audition grid
 
-Dissonance is opt-in through `--dissonance`, `Command::Harmony`, or Scene's
-Diatonic/Dissonant selectors. Its four distinct chromatic pitch classes and
+Dissonant harmony is the library and CLI default. `--harmony diatonic`,
+`Command::Harmony`, and Scene's Diatonic/Dissonant selectors retain explicit
+palette selection. Its four distinct chromatic pitch classes and
 pedal derive from every normalized ticker ASCII byte using the documented
 fixed integer hash/shuffle. All twelve pitch classes are reachable, with no
 scale quantization. The chord stays fixed across render seeds, market data,
@@ -567,24 +575,27 @@ public dissonance tests and six private harmony tests pass.
 The Scene page displays a six-column, four-row grid of 24 tickers. Mouse and
 keyboard selections remain silent UI actions and use the same validated
 symbol command as manual entry. Rejected queue submissions leave selections
-unchanged; reset restores the startup ticker and harmony mode. All 41 CLI/TUI
+unchanged; reset restores the startup ticker and harmony mode. All 43 CLI/TUI
 tests pass, including visibility/hit targets at 80x24, 100x32, 140x24, and
 160x36. Headless CLI checks also pass. Actual Scene buffers at 80x24 and
 160x36 were captured and inspected for readable ticker names and mode
 controls. Text captures are in `/private/tmp/shzx-sfx-dissonance-audit/`.
 
-A saved pre-feature executable and the new executable rendered the same
-32-second, 48 kHz, seed-123 default-mode timeline with matching mixer
-settings and all four new accent layers muted, switching AAPL to IBM at
-8 seconds and TSLA at 20 seconds. All 1,536,000 stereo frames were bitwise
-identical, with maximum sample difference zero. Default peak/RMS are
--10.37/-23.10 dBFS. The matching Dissonant export measures
--10.14/-23.27 dBFS, with 96.64% measured energy below 420 Hz and a
-maximum sample step of 0.00994. Around the two ticker changes, maximum steps
-are 0.00727 and 0.00520. These
-are offline signal checks, not a listening verdict or native device test.
-Both WAVs and their mode-bearing JSONL traces are in
-`/private/tmp/shzx-sfx-dissonance-audit/`.
+A 32-second, 48 kHz, seed-123 default environment export switches AAPL to IBM
+at 8 seconds and TSLA at 20 seconds, with UI and transmission muted. All
+snapshots report Dissonant harmony. Peak/RMS are -11.44/-25.95 dBFS, with
+92.98% of measured energy below 420 Hz and a maximum sample step of 0.01274.
+Around the two ticker changes, maximum steps are 0.00751 and 0.00760. All
+samples are finite. The WAV and mode-bearing JSONL trace are in
+`/private/tmp/shzx-sfx-dissonant-coins/`.
+
+All 13 TUI mixer faders share a cubic response: normalized position cubed is
+the linear amplitude gain sent to the renderer. A halfway position applies
+0.125 gain and displays -18.1 dB; zero displays `mute`, and full travel gives
+unity. Output trim retains its independent dB scale. Tests exercise keyboard
+and fine steps, endpoint clicks, midpoint dragging, reset, command values,
+bar positions, and gain readouts at 80x24, 140x24, and 280x36. All use the
+existing numeric-control path without separate stored fader positions.
 
 
 ## Reference-calibrated demonic voices

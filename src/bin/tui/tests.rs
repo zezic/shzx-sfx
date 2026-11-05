@@ -229,6 +229,42 @@ fn sliders_clamp_their_domains_and_local_audition_controls_send_no_audio_updates
 }
 
 #[test]
+fn mixer_faders_apply_perceptual_steps_and_submit_linear_audio_gains() {
+    let mut app = app();
+    app.select_tab(Tab::Mixer);
+    for layer in MixLayer::ALL {
+        let control = Control::Mix(layer);
+        app.focus = control;
+        let mut commands = Vec::new();
+        let mut send = |command| {
+            commands.push(command);
+            Ok(())
+        };
+        app.key(key(KeyCode::Home, KeyEventKind::Press), &mut send);
+        assert_eq!(layer.get(app.mix), Unit::ZERO);
+        for _ in 0..10 {
+            app.key(key(KeyCode::Right, KeyEventKind::Press), &mut send);
+        }
+        assert!((layer.get(app.mix).get() - 0.125).abs() < 1e-6);
+        assert!((app.numeric(control).unwrap().0 - 0.5).abs() < 1e-6);
+        app.key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+            &mut send,
+        );
+        assert!((layer.get(app.mix).get() - 0.132651).abs() < 1e-6);
+        app.key(key(KeyCode::End, KeyEventKind::Press), &mut send);
+        assert_eq!(layer.get(app.mix), Unit::ONE);
+        assert_eq!(commands.last(), Some(&Command::Mix(app.mix)));
+    }
+    app.activate(Control::Reset, &mut |_| Ok(()));
+    assert_eq!(app.mix, app.initial_mix);
+    for layer in MixLayer::ALL {
+        let position = app.numeric(Control::Mix(layer)).unwrap().0;
+        assert!((position.powi(3) - layer.get(app.initial_mix).get()).abs() < 1e-6);
+    }
+}
+
+#[test]
 fn mute_restores_the_previous_level_and_is_recoverable_from_an_initial_zero() {
     let mut app = app();
     let initial = app.mix.master;
@@ -903,23 +939,20 @@ fn ticker_grid_sends_only_symbol_commands_and_keeps_rejected_selections_unchange
 fn harmony_buttons_apply_only_accepted_modes_and_reset_restores_the_startup_mode() {
     let mut app = app();
     let mut accepted = Vec::new();
-    app.activate(
-        Control::SetHarmony(HarmonyMode::Dissonant),
-        &mut |command| {
-            accepted.push(command);
-            Ok(())
-        },
-    );
-    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
-    assert_eq!(accepted, [Command::Harmony(HarmonyMode::Dissonant)]);
-    app.activate(Control::SetHarmony(HarmonyMode::Diatonic), &mut |_| {
-        Err(shzx_sfx::Error::QueueFull)
-    });
-    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
-    app.activate(Control::Reset, &mut |command| {
+    app.activate(Control::SetHarmony(HarmonyMode::Diatonic), &mut |command| {
         accepted.push(command);
         Ok(())
     });
     assert_eq!(app.harmony_mode, HarmonyMode::Diatonic);
-    assert!(accepted.contains(&Command::Harmony(HarmonyMode::Diatonic)));
+    assert_eq!(accepted, [Command::Harmony(HarmonyMode::Diatonic)]);
+    app.activate(Control::SetHarmony(HarmonyMode::Dissonant), &mut |_| {
+        Err(shzx_sfx::Error::QueueFull)
+    });
+    assert_eq!(app.harmony_mode, HarmonyMode::Diatonic);
+    app.activate(Control::Reset, &mut |command| {
+        accepted.push(command);
+        Ok(())
+    });
+    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
+    assert!(accepted.contains(&Command::Harmony(HarmonyMode::Dissonant)));
 }

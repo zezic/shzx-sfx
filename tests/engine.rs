@@ -1,6 +1,7 @@
 use shzx_sfx::{
-    Candle, Chord, ChordShape, Command, MarketContext, Mix, Mode, Pan, RenderConfig, Renderer,
-    SfxEvent, SfxKind, SpatialMode, Symbol, TransmissionCount, TransmissionRate, Trend, Unit,
+    Candle, Chord, ChordShape, Command, HarmonyMode, MarketContext, Mix, Mode, Pan, RenderConfig,
+    Renderer, SfxEvent, SfxKind, SpatialMode, Symbol, TransmissionCount, TransmissionRate, Trend,
+    Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -146,7 +147,11 @@ fn visible_candle_metrics_are_scale_independent_and_use_mean_volume() {
 }
 
 fn scheduled_render(block_size: usize) -> (Vec<[f32; 2]>, shzx_sfx::Snapshot) {
-    let mut renderer = Renderer::new(config(8_000)).unwrap();
+    let mut renderer = Renderer::new(RenderConfig {
+        harmony_mode: HarmonyMode::Diatonic,
+        ..config(8_000)
+    })
+    .unwrap();
     let market = MarketContext {
         trend: Trend::Bearish,
         trend_strength: Unit::ONE,

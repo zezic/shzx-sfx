@@ -1,7 +1,7 @@
 use fundsp::{fft::real_fft, math::Complex32};
 use shzx_sfx::{
-    AmbientSnapshot, BackgroundSnapshot, Command, MarketContext, Mix, OutputGain, RenderConfig,
-    Renderer, ReverbSettings, Symbol, Unit,
+    AmbientSnapshot, BackgroundSnapshot, Command, HarmonyMode, MarketContext, Mix, OutputGain,
+    RenderConfig, Renderer, ReverbSettings, Symbol, Unit,
 };
 
 const RATE: u32 = 48_000;
@@ -162,6 +162,7 @@ fn irregular_blocks_and_live_tickers_reproduce_while_letters_affect_the_voices()
         .unwrap();
     let mut first_config = config(Source::Voices, 8_000);
     first_config.symbol = first;
+    first_config.harmony_mode = HarmonyMode::Diatonic;
     let mut unchanged = Renderer::new(first_config).unwrap();
     let mut changed = Renderer::new(first_config).unwrap();
     advance(&mut unchanged, 8_000);

@@ -36,7 +36,7 @@ impl Symbol {
         self.0.as_str()
     }
 
-    /// Diatonic anchor in the default A-natural-minor palette.
+    /// Diatonic anchor in the A-natural-minor palette.
     #[must_use]
     pub fn root(self) -> ScaleDegree {
         ScaleDegree::ALL[(self.ascii_hash() % ScaleDegree::ALL.len() as u64) as usize]
@@ -555,7 +555,7 @@ impl Default for Mix {
         Self {
             master: Unit(0.55),
             output_gain: OutputGain::default(),
-            drone: Unit(0.65),
+            drone: Unit(0.35),
             sub: Unit(0.35),
             texture: Unit(0.45),
             harmony: Unit(0.55),
@@ -565,7 +565,7 @@ impl Default for Mix {
             flying_coins: Unit(0.05),
             laser_beams: Unit(0.05),
             ui: Unit(0.40),
-            transmission: Unit(0.22),
+            transmission: Unit(0.10),
             reverb: Unit(0.5),
         }
     }

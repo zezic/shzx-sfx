@@ -581,7 +581,16 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let rows = MixLayer::ALL.len().div_ceil(columns.len());
     for (index, layer) in MixLayer::ALL.into_iter().enumerate() {
         let column = columns[index / rows];
-        let value = SliderValue::percent(layer.get(app.mix));
+        let control = Control::Mix(layer);
+        let gain = layer.get(app.mix).get();
+        let value = SliderValue {
+            position: app.numeric(control).expect("mixer faders are numeric").0,
+            display: if gain == 0.0 {
+                "mute".into()
+            } else {
+                format!("{:+.1}dB", 20.0 * gain.log10())
+            },
+        };
         let label = match layer {
             MixLayer::Master => "Master",
             MixLayer::Drone => "Drone",
@@ -602,7 +611,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             Rect::new(column.x, column.y + (index % rows) as u16, column.width, 1),
             label,
             value,
-            Control::Mix(layer),
+            control,
             app,
             hits,
         );
@@ -624,7 +633,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     );
     if inner.height >= rows as u16 + 5 {
         frame.render_widget(
-            Paragraph::new("Gains are linear; zero silences a layer. Changes are smoothed.")
+            Paragraph::new("Perceptual faders; values show gain in dB. Zero mutes; full is unity.")
                 .style(Style::default().fg(DIM)),
             Rect::new(inner.x + 1, inner.y + rows as u16 + 4, inner.width - 2, 1),
         );
@@ -1824,7 +1833,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
             Line::raw("Tab / Shift-Tab Move focus between controls"),
             Line::raw("Up / Down       Move focus; browse sounds in the SFX list"),
             Line::raw("Left / Right    Adjust a focused value"),
-            Line::raw("Mixer output gain uses dB; Shift adjusts it in smaller steps."),
+            Line::raw("Mixer faders are perceptual; readouts show dB. Shift gives finer steps."),
             Line::raw("Enter           Activate the focused button"),
             Line::raw("Space           Audition the selected effect"),
             Line::raw("I / Inspect     Show layers; PgUp/Down browses inspected sounds"),
@@ -2154,6 +2163,47 @@ mod tests {
                 target: 0.5,
             },
         };
+    }
+
+    #[test]
+    fn mixer_mouse_positions_match_the_perceptual_bar_and_db_readout() {
+        for (width, height) in [(80, 24), (140, 24), (280, 36)] {
+            let mut app = app();
+            app.select_tab(Tab::Mixer);
+            app.mix.master = Unit::new(0.125).unwrap();
+            app.mix.demonic_stutters = Unit::ZERO;
+            let control = Control::Mix(MixLayer::Master);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+            let region = hits.region(control).unwrap();
+            let buffer = terminal.backend().buffer();
+            let bar = (region.x..region.right())
+                .map(|x| buffer[(x, region.y)].symbol())
+                .collect::<String>();
+            assert_eq!(
+                bar.chars().filter(|&ch| ch == '#').count(),
+                (region.width as f32 * 0.5).round() as usize
+            );
+            let row = (0..width)
+                .map(|x| buffer[(x, region.y)].symbol())
+                .collect::<String>();
+            assert!(row.contains("-18.1dB"), "{width}x{height}: {row}");
+            assert!(row.contains("mute"), "{width}x{height}: {row}");
+            let mut send = |_| Ok(());
+            super::super::slide(&mut app, &hits, control, region.x, &mut send);
+            assert_eq!(app.mix.master, Unit::ZERO);
+            super::super::slide(&mut app, &hits, control, region.right() - 1, &mut send);
+            assert_eq!(app.mix.master, Unit::ONE);
+            // A drag's middle cell can straddle the exact half-position.
+            let middle = region.x + (region.width - 1) / 2;
+            super::super::slide(&mut app, &hits, control, middle, &mut send);
+            assert!(app.mix.master.get() > 0.06 && app.mix.master.get() <= 0.125);
+            let position = app.numeric(control).unwrap().0;
+            let step = App::numeric_step(control, false);
+            app.adjust(control, step, &mut send);
+            assert!((app.numeric(control).unwrap().0 - position - step).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -2679,8 +2729,14 @@ mod tests {
     #[test]
     fn monitor_distinguishes_current_targets_crossfade_and_held_schedulers() {
         let mut app = app();
+        app.harmony_mode = HarmonyMode::Diatonic;
         app.select_tab(Tab::Monitor);
-        let mut snapshot = Renderer::new(RenderConfig::default()).unwrap().snapshot();
+        let mut snapshot = Renderer::new(RenderConfig {
+            harmony_mode: HarmonyMode::Diatonic,
+            ..RenderConfig::default()
+        })
+        .unwrap()
+        .snapshot();
         snapshot.market = MarketContext {
             zoom: Unit::ONE,
             trend: Trend::Bullish,
@@ -2800,7 +2856,7 @@ mod tests {
                 "NVDA_",
                 "Apply / Enter",
                 "Cancel / Esc",
-                HarmonyMode::Diatonic.label(),
+                HarmonyMode::Dissonant.label(),
                 "Invalid symbols",
             ] {
                 assert!(

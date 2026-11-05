@@ -70,9 +70,16 @@ struct EngineArgs {
     /// Ticker used to select a deterministic harmonic base.
     #[arg(long, default_value = "AAPL")]
     symbol: String,
-    /// Use a fixed chromatic dissonant harmony selected by the ticker.
-    #[arg(long)]
-    dissonance: bool,
+    /// Harmony palette: diatonic or dissonant.
+    #[arg(
+        long = "harmony",
+        alias = "dissonance",
+        default_value_t,
+        num_args = 0..=1,
+        default_missing_value = "dissonant",
+        value_name = "MODE"
+    )]
+    harmony_mode: HarmonyMode,
     #[arg(long, default_value_t = 48_000)]
     sample_rate: u32,
     #[arg(long, default_value_t = 0x5348_495a_4558)]
@@ -104,11 +111,7 @@ impl EngineArgs {
         }
         Ok(RenderConfig {
             symbol: Symbol::new(&self.symbol)?,
-            harmony_mode: if self.dissonance {
-                HarmonyMode::Dissonant
-            } else {
-                HarmonyMode::Diatonic
-            },
+            harmony_mode: self.harmony_mode,
             sample_rate: self.sample_rate,
             seed: self.seed,
             max_voices: self.max_voices,
@@ -1490,9 +1493,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dissonance_is_opt_in_and_reaches_the_startup_configuration() {
+    fn harmony_defaults_to_dissonant_and_explicit_modes_reach_the_startup_configuration() {
         for (flags, expected) in [
-            (Vec::new(), HarmonyMode::Diatonic),
+            (Vec::new(), HarmonyMode::Dissonant),
+            (vec!["--harmony", "diatonic"], HarmonyMode::Diatonic),
+            (vec!["--harmony", "dissonant"], HarmonyMode::Dissonant),
             (vec!["--dissonance"], HarmonyMode::Dissonant),
         ] {
             let cli = Cli::try_parse_from(

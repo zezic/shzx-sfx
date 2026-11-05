@@ -24,8 +24,15 @@ impl ToneKind {
 }
 
 enum Envelope {
-    Swell { attack: u32, release: u32 },
-    Beam { duration: u32, edge: u32 },
+    Swell {
+        attack: u32,
+        release: u32,
+    },
+    Beam {
+        duration: u32,
+        edge: u32,
+        pulse: Pulse,
+    },
 }
 
 impl Envelope {
@@ -36,22 +43,27 @@ impl Envelope {
         }
     }
 
-    fn amplitude(&self, age: u32) -> f32 {
-        let progress = match *self {
+    fn tick(&mut self, age: u32) -> f32 {
+        let (progress, gate) = match self {
             Self::Swell { attack, release } => {
-                if age < attack {
-                    age as f32 / attack as f32
+                let progress = if age < *attack {
+                    age as f32 / *attack as f32
                 } else {
-                    (attack + release - age) as f32 / release as f32
-                }
+                    (*attack + *release - age) as f32 / *release as f32
+                };
+                (progress, 1.0)
             }
-            Self::Beam { duration, edge } => {
-                let attack = age as f32 / edge as f32;
-                let release = (duration - age) as f32 / (edge * 30) as f32;
-                attack.min(release).min(1.0)
+            Self::Beam {
+                duration,
+                edge,
+                pulse,
+            } => {
+                let attack = age as f32 / *edge as f32;
+                let release = (*duration - age) as f32 / (*edge * 30) as f32;
+                (attack.min(release).min(1.0), pulse.tick())
             }
         };
-        progress * progress * (3.0 - 2.0 * progress)
+        progress * progress * (3.0 - 2.0 * progress) * gate
     }
 }
 
@@ -80,34 +92,93 @@ impl Pulse {
     }
 }
 
-enum PitchMotion {
-    Steady,
-    OnsetShake { oscillator: Osc, depth: f32 },
-}
-
 struct Partial {
     carrier: Osc,
     level_lfo: Osc,
-    index_lfo: Osc,
     level_depth: f32,
+    pan: [f32; 2],
+}
+
+impl Partial {
+    fn mix(&mut self, wave: f32, table: &SineTable, output: &mut [f32; 2]) {
+        let amplitude = 1.0 - self.level_depth * (0.5 + self.level_lfo.tick(table) * 0.5);
+        for (channel, value) in output.iter_mut().enumerate() {
+            *value += wave * amplitude * self.pan[channel];
+        }
+    }
+}
+
+struct ModulatedPartial {
+    partial: Partial,
+    index_lfo: Osc,
     index_depth: f32,
     index: f32,
-    pan: [f32; 2],
-    pitch: PitchMotion,
-    pulse: Option<Pulse>,
+    shake: Osc,
+    shake_depth: f32,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Formation starts and retirement must keep all storage inline and allocation-free"
+)]
+enum Partials {
+    Independent(ArrayVec<Partial, MAX_PARTIALS>),
+    /// Matrix rows read the preceding sample, avoiding algebraic loops.
+    Coupled {
+        partials: ArrayVec<ModulatedPartial, MAX_PARTIALS>,
+        matrix: [[f32; MAX_PARTIALS]; MAX_PARTIALS],
+        previous: [f32; MAX_PARTIALS],
+    },
+}
+
+impl Partials {
+    fn tick(&mut self, table: &SineTable, onset: f32) -> [f32; 2] {
+        let mut output = [0.0; 2];
+        match self {
+            Self::Independent(partials) => {
+                for partial in partials {
+                    let wave = partial.carrier.tick(table);
+                    partial.mix(wave, table, &mut output);
+                }
+            }
+            Self::Coupled {
+                partials,
+                matrix,
+                previous,
+            } => {
+                let mut current = [0.0; MAX_PARTIALS];
+                for (index, partial) in partials.iter_mut().enumerate() {
+                    let pm = matrix[index]
+                        .iter()
+                        .zip(previous.iter())
+                        .map(|(weight, previous)| weight * previous)
+                        .sum::<f32>();
+                    let index_gain =
+                        1.0 - partial.index_depth * (0.5 + partial.index_lfo.tick(table) * 0.5);
+                    let pitch =
+                        1.0 + partial.shake.tick(table) * partial.shake_depth * onset * onset;
+                    let wave = partial.partial.carrier.tick_modulated(
+                        table,
+                        pm * partial.index * index_gain,
+                        pitch,
+                    );
+                    current[index] = wave;
+                    partial.partial.mix(wave, table, &mut output);
+                }
+                *previous = current;
+            }
+        }
+        output
+    }
 }
 
 struct Formation {
     age: u32,
     envelope: Envelope,
-    partials: ArrayVec<Partial, MAX_PARTIALS>,
-    matrix: [[f32; MAX_PARTIALS]; MAX_PARTIALS],
-    previous: [f32; MAX_PARTIALS],
+    partials: Partials,
     gain: f32,
 }
 
-/// A bounded PM network. Every matrix row reads the preceding sample, so its
-/// result is independent of partial iteration order and contains no algebraic loop.
 pub(super) struct ToneFormation {
     rate: f32,
     kind: ToneKind,
@@ -141,7 +212,14 @@ impl ToneFormation {
         };
         let opposite = if count >= 5 { rng.usize(1..=2) } else { 1 };
         let (low, high) = self.kind.band();
-        let mut partials = ArrayVec::new();
+        let mut partials = match self.kind {
+            ToneKind::FlyingCoins => Partials::Independent(ArrayVec::new()),
+            ToneKind::LaserBeams => Partials::Coupled {
+                partials: ArrayVec::new(),
+                matrix: [[0.0; MAX_PARTIALS]; MAX_PARTIALS],
+                previous: [0.0; MAX_PARTIALS],
+            },
+        };
         for index in 0..count {
             let position = match self.kind {
                 ToneKind::FlyingCoins => {
@@ -150,47 +228,41 @@ impl ToneFormation {
                 }
                 ToneKind::LaserBeams => center + (rng.f32() - 0.5) * 0.1,
             };
-            let (level_depth, pm_index, pitch, pulse) = match self.kind {
-                ToneKind::FlyingCoins => (
-                    0.25 + rng.f32() * 0.65,
-                    0.025 + rng.f32() * 0.055,
-                    PitchMotion::Steady,
-                    None,
-                ),
-                ToneKind::LaserBeams => (
-                    0.005 + rng.f32() * 0.025,
-                    0.001 + rng.f32() * 0.004,
-                    PitchMotion::OnsetShake {
-                        oscillator: Osc::new(40.0 + rng.f32() * 160.0, self.rate, rng.f32()),
-                        depth: 0.003 + rng.f32() * 0.012,
-                    },
-                    Some(Pulse::new(self.rate, rng)),
-                ),
+            let level_depth = match self.kind {
+                ToneKind::FlyingCoins => 0.25 + rng.f32() * 0.65,
+                ToneKind::LaserBeams => 0.005 + rng.f32() * 0.025,
             };
-            partials.push(Partial {
+            let partial = Partial {
                 carrier: Osc::new(low + rng.f32() * (high - low), self.rate, rng.f32()),
                 level_lfo: Osc::new(0.3 + rng.f32() * 3.7, self.rate, rng.f32()),
-                index_lfo: Osc::new(0.3 + rng.f32() * 3.7, self.rate, rng.f32()),
                 level_depth,
-                index_depth: 0.15 + rng.f32() * 0.85,
-                index: pm_index,
                 pan: PanGains::new(Pan::new(position).expect("bounded formation position"))
                     .for_mode(SpatialMode::Pan),
-                pitch,
-                pulse,
-            });
-        }
-        let mut matrix = [[0.0; MAX_PARTIALS]; MAX_PARTIALS];
-        for (row_index, row) in matrix.iter_mut().enumerate().take(count) {
-            for (column, weight) in row.iter_mut().enumerate().take(count) {
-                if column != row_index {
-                    *weight = rng.f32() * 2.0 - 1.0;
-                }
+            };
+            match &mut partials {
+                Partials::Independent(partials) => partials.push(partial),
+                Partials::Coupled { partials, .. } => partials.push(ModulatedPartial {
+                    partial,
+                    index: 0.001 + rng.f32() * 0.004,
+                    shake: Osc::new(40.0 + rng.f32() * 160.0, self.rate, rng.f32()),
+                    shake_depth: 0.003 + rng.f32() * 0.012,
+                    index_lfo: Osc::new(0.3 + rng.f32() * 3.7, self.rate, rng.f32()),
+                    index_depth: 0.15 + rng.f32() * 0.85,
+                }),
             }
-            let scale = row.iter().map(|weight| weight.abs()).sum::<f32>();
-            assert!(scale > 0.0, "PM matrix row must have an input");
-            for weight in row.iter_mut().take(count) {
-                *weight /= scale;
+        }
+        if let Partials::Coupled { matrix, .. } = &mut partials {
+            for (row_index, row) in matrix.iter_mut().enumerate().take(count) {
+                for (column, weight) in row.iter_mut().enumerate().take(count) {
+                    if column != row_index {
+                        *weight = rng.f32() * 2.0 - 1.0;
+                    }
+                }
+                let scale = row.iter().map(|weight| weight.abs()).sum::<f32>();
+                assert!(scale > 0.0, "PM matrix row must have an input");
+                for weight in row.iter_mut().take(count) {
+                    *weight /= scale;
+                }
             }
         }
         let envelope = match self.kind {
@@ -201,14 +273,13 @@ impl ToneFormation {
             ToneKind::LaserBeams => Envelope::Beam {
                 duration: ((6.0 + rng.f32() * 8.0) * self.rate) as u32,
                 edge: (self.rate * 0.001) as u32,
+                pulse: Pulse::new(self.rate, rng),
             },
         };
         self.source = Some(Formation {
             age: 0,
             envelope,
             partials,
-            matrix,
-            previous: [0.0; MAX_PARTIALS],
             gain: match self.kind {
                 ToneKind::FlyingCoins => 0.012,
                 ToneKind::LaserBeams => 0.006,
@@ -226,40 +297,9 @@ impl ToneFormation {
         };
         let mut output = [0.0; 2];
         if let Some(source) = &mut self.source {
-            let mut current = [0.0; MAX_PARTIALS];
-            for (index, partial) in source.partials.iter_mut().enumerate() {
-                let pm = source.matrix[index]
-                    .iter()
-                    .zip(source.previous)
-                    .map(|(weight, previous)| weight * previous)
-                    .sum::<f32>();
-                let index_gain =
-                    1.0 - partial.index_depth * (0.5 + partial.index_lfo.tick(table) * 0.5);
-                let pitch = match &mut partial.pitch {
-                    PitchMotion::Steady => 1.0,
-                    PitchMotion::OnsetShake { oscillator, depth } => {
-                        let envelope = (1.0 - source.age as f32 / (self.rate * 0.1)).max(0.0);
-                        1.0 + oscillator.tick(table) * *depth * envelope * envelope
-                    }
-                };
-                let wave =
-                    partial
-                        .carrier
-                        .tick_modulated(table, pm * partial.index * index_gain, pitch);
-                current[index] = wave;
-                let gate = match &mut partial.pulse {
-                    Some(pulse) => pulse.tick(),
-                    None => 1.0,
-                };
-                let amplitude = (1.0
-                    - partial.level_depth * (0.5 + partial.level_lfo.tick(table) * 0.5))
-                    * gate;
-                for (channel, value) in output.iter_mut().enumerate() {
-                    *value += wave * amplitude * partial.pan[channel];
-                }
-            }
-            source.previous = current;
-            let gain = source.envelope.amplitude(source.age) * source.gain;
+            let onset = (1.0 - source.age as f32 / (self.rate * 0.1)).max(0.0);
+            output = source.partials.tick(table, onset);
+            let gain = source.envelope.tick(source.age) * source.gain;
             output = output.map(|value| value * gain);
             source.age += 1;
             if source.age >= source.envelope.duration() {
@@ -322,7 +362,7 @@ impl Band {
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, Envelope, PitchMotion, Pulse, ToneFormation, ToneKind};
+    use super::{Band, Envelope, Partials, Pulse, ToneFormation, ToneKind};
     use crate::dsp::SineTable;
     use fundsp::{fft::real_fft, hacker32::AudioNode, math::Complex32};
 
@@ -336,26 +376,25 @@ mod tests {
     fn formations_keep_the_requested_register_and_stereo_groups() {
         for kind in [ToneKind::FlyingCoins, ToneKind::LaserBeams] {
             for seed in 0..128 {
-                let mut formation = formation(48_000, kind, seed);
+                let formation = formation(48_000, kind, seed);
                 let source = formation.source.as_ref().unwrap();
-                let partials = &source.partials;
+                let partials: Vec<_> = match &source.partials {
+                    Partials::Independent(partials) => partials.iter().collect(),
+                    Partials::Coupled { partials, .. } => {
+                        for partial in partials {
+                            assert!(
+                                (0.3..=4.0).contains(&partial.index_lfo.frequency_hz(48_000.0))
+                            );
+                            assert!((40.0..=200.0).contains(&partial.shake.frequency_hz(48_000.0)));
+                        }
+                        partials.iter().map(|partial| &partial.partial).collect()
+                    }
+                };
                 assert!((2..=10).contains(&partials.len()));
                 let (low, high) = kind.band();
-                for partial in partials {
+                for partial in &partials {
                     assert!((low..=high).contains(&partial.carrier.frequency_hz(48_000.0)));
-                    for lfo in [&partial.level_lfo, &partial.index_lfo] {
-                        assert!((0.3..=4.0).contains(&lfo.frequency_hz(48_000.0)));
-                    }
-                    if let PitchMotion::OnsetShake { oscillator, .. } = &partial.pitch {
-                        assert!((40.0..=200.0).contains(&oscillator.frequency_hz(48_000.0)));
-                    }
-                    match kind {
-                        ToneKind::FlyingCoins => assert!(partial.pulse.is_none()),
-                        ToneKind::LaserBeams => {
-                            let pulse = partial.pulse.as_ref().unwrap();
-                            assert!((3.0..=10.0).contains(&(pulse.step * 48_000.0)));
-                        }
-                    }
+                    assert!((0.3..=4.0).contains(&partial.level_lfo.frequency_hz(48_000.0)));
                 }
                 let left = partials
                     .iter()
@@ -376,14 +415,10 @@ mod tests {
                         let min = pans.iter().copied().fold(f32::INFINITY, f32::min);
                         let max = pans.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                         assert!(max - min < 0.08);
-                        let source = formation.source.as_mut().unwrap();
-                        let (first, others) = source.partials.split_at_mut(1);
-                        let first = first[0].pulse.as_mut().unwrap();
-                        let second = others[0].pulse.as_mut().unwrap();
-                        assert!(
-                            (0..48_000).any(|_| (first.tick() >= 0.5) != (second.tick() >= 0.5)),
-                            "seed {seed}: partial pulse patterns must move independently"
-                        );
+                        let Envelope::Beam { pulse, .. } = &source.envelope else {
+                            panic!()
+                        };
+                        assert!((3.0..=10.0).contains(&(pulse.step * 48_000.0)));
                     }
                 }
             }
@@ -444,38 +479,79 @@ mod tests {
     }
 
     #[test]
-    fn coin_pm_matrix_changes_the_audio_more_than_the_weak_laser_matrix() {
+    fn laser_pm_matrix_has_a_subtle_effect_on_the_audio() {
         let table = SineTable::new();
-        let mut relative_changes = Vec::new();
-        for kind in [ToneKind::FlyingCoins, ToneKind::LaserBeams] {
-            let mut modulated = formation(48_000, kind, 123);
-            let mut unmodulated = formation(48_000, kind, 123);
-            for partial in &mut unmodulated.source.as_mut().unwrap().partials {
-                partial.index = 0.0;
+        let mut modulated = formation(48_000, ToneKind::LaserBeams, 123);
+        let mut unmodulated = formation(48_000, ToneKind::LaserBeams, 123);
+        let Partials::Coupled { partials, .. } = &mut unmodulated.source.as_mut().unwrap().partials
+        else {
+            panic!()
+        };
+        for partial in partials {
+            partial.index = 0.0;
+        }
+        let mut energy = 0.0_f64;
+        let mut error = 0.0_f64;
+        for sample in 0..144_000 {
+            let with_pm = modulated.tick(&table);
+            let without_pm = unmodulated.tick(&table);
+            if sample >= 96_000 {
+                for channel in 0..2 {
+                    energy += f64::from(without_pm[channel]).powi(2);
+                    error += f64::from(with_pm[channel] - without_pm[channel]).powi(2);
+                }
             }
-            let mut energy = 0.0_f64;
-            let mut error = 0.0_f64;
-            for sample in 0..144_000 {
-                let with_pm = modulated.tick(&table);
-                let without_pm = unmodulated.tick(&table);
-                if sample >= 96_000 {
-                    for channel in 0..2 {
-                        energy += f64::from(without_pm[channel]).powi(2);
-                        error += f64::from(with_pm[channel] - without_pm[channel]).powi(2);
+        }
+        let relative_change = (error / energy).sqrt();
+        assert!(
+            (1e-5..0.01).contains(&relative_change),
+            "laser PM relative RMS {relative_change}"
+        );
+    }
+
+    #[test]
+    fn laser_partials_switch_together_in_the_rendered_formation() {
+        let table = SineTable::new();
+        for rate in [44_100, 48_000, 192_000] {
+            for hz in [3.0, 10.0] {
+                for seed in 0..4 {
+                    let mut laser = formation(rate, ToneKind::LaserBeams, seed);
+                    let Envelope::Beam { pulse, .. } = &mut laser.source.as_mut().unwrap().envelope
+                    else {
+                        panic!()
+                    };
+                    pulse.step = hz / f64::from(rate);
+                    let mut on = [0.0; 3];
+                    let mut off = [0.0; 3];
+                    let frames = (f64::from(rate) * 3.0 / hz) as u32;
+                    for age in 0..frames {
+                        let cycle = f64::from(age) * hz / f64::from(rate);
+                        let phase = cycle.fract();
+                        let energy = laser
+                            .tick(&table)
+                            .iter()
+                            .map(|value| f64::from(*value).powi(2))
+                            .sum::<f64>();
+                        if (0.2..0.4).contains(&phase) {
+                            on[cycle as usize] += energy;
+                        } else if (0.7..0.9).contains(&phase) {
+                            off[cycle as usize] += energy;
+                        }
+                    }
+                    for (cycle, (on, off)) in on.into_iter().zip(off).enumerate() {
+                        assert!(
+                            on > 1e-6,
+                            "{rate} Hz, {hz} Hz pulse, seed {seed}, cycle {cycle}: on energy {on:e}"
+                        );
+                        assert!(
+                            off < on * 1e-7,
+                            "{rate} Hz, {hz} Hz pulse, seed {seed}, cycle {cycle}: off/on energy {}",
+                            off / on
+                        );
                     }
                 }
             }
-            relative_changes.push((error / energy).sqrt());
         }
-        assert!(
-            relative_changes[0] > 0.01,
-            "coin PM relative RMS {}",
-            relative_changes[0]
-        );
-        assert!(
-            relative_changes[1] < relative_changes[0] * 0.2,
-            "coin/laser PM relative RMS {relative_changes:?}"
-        );
     }
 
     #[test]
