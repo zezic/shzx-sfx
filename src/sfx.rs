@@ -967,17 +967,19 @@ impl Recipe {
                 .level(0.13)
                 .pattern(ASCENT),
             Warning => Self::digital(360.0, 0.48, 0.8, 0.0)
-                .level(0.17)
+                .level(0.120_350_79)
                 .pattern(WARNING),
             Error => Self::digital(250.0, 0.57, 1.6, 48.0)
-                .level(0.18)
+                .level(0.127_430_25)
                 .pattern(REJECTION),
-            OrderCreate => Self::servo(280.0, 0.72, 0.38).level(0.18).pattern(CREATE),
+            OrderCreate => Self::servo(280.0, 0.72, 0.38)
+                .level(0.127_430_25)
+                .pattern(CREATE),
             OrderFill => Self::digital(390.0, 0.95, 0.3, 0.0)
-                .level(0.19)
+                .level(0.134_509_7)
                 .pattern(FILL),
             OrderCancel => Self::contact(440.0, 0.63, 0.52)
-                .level(0.17)
+                .level(0.120_350_79)
                 .pattern(CANCEL_ORDER),
             Connect => Self::digital(430.0, 0.52, 0.5, 75.0)
                 .level(0.12)

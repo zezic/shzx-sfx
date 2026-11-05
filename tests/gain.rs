@@ -52,13 +52,14 @@ fn default_ui_levels_are_audible_without_maximizing_the_mixer() {
         melody: Unit::ZERO,
         ..Mix::default()
     };
+    assert!((20.0 * mix.ui.get().log10() + 10.0).abs() < 0.00001);
     let mut measurements = Vec::new();
-    // Listening references include the broad 3 kHz comfort cut; avoid makeup
-    // gain that would restore the ear pressure the equalizer removes.
+    // Listening references include the -10 dB UI bus and broad 3 kHz comfort
+    // cut; avoid makeup gain that would restore the removed ear pressure.
     for (kind, minimum_peak, minimum_rms) in [
-        (SfxKind::Click, 0.14, 0.020),
-        (SfxKind::Confirm, 0.12, 0.020),
-        (SfxKind::OrderFill, 0.17, 0.022),
+        (SfxKind::Click, 0.110, 0.0158),
+        (SfxKind::Confirm, 0.095, 0.0158),
+        (SfxKind::OrderFill, 0.095, 0.0123),
     ] {
         let mut renderer = renderer(mix);
         let mut warmup = vec![[0.0; 2]; SAMPLE_RATE as usize * 5 / 4];

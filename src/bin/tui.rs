@@ -1,3 +1,5 @@
+mod activity;
+mod events;
 mod view;
 
 use std::{
@@ -228,6 +230,7 @@ enum Control {
     CommitSymbol,
     PickSymbol(Symbol),
     ToggleTickerNavigation,
+    ToggleUserActivity,
     CancelSymbol,
     Tab(Tab),
     SetMode(Mode),
@@ -365,6 +368,8 @@ enum Overlay {
 struct App {
     symbol: Symbol,
     ticker_navigation: TickerNavigation,
+    activity: activity::UserActivity,
+    event_log: events::EventLog,
     initial_symbol: Symbol,
     initial_harmony_mode: HarmonyMode,
     symbol_input: String,
@@ -399,6 +404,8 @@ impl App {
         Self {
             symbol: config.symbol,
             ticker_navigation: TickerNavigation::new(config.seed, config.symbol),
+            activity: activity::UserActivity::new(config.seed),
+            event_log: events::EventLog::default(),
             initial_symbol: config.symbol,
             initial_harmony_mode: config.harmony_mode,
             symbol_input: String::new(),
@@ -448,7 +455,10 @@ impl App {
                     }
                     Command::Reverb(reverb) => self.reverb = reverb,
                     Command::Spatial(spatial) => self.spatial = spatial,
-                    Command::Trigger(event) => self.effect = event.kind,
+                    Command::Trigger(event) => {
+                        self.effect = event.kind;
+                        self.event_log.record(events::EventSource::User, event);
+                    }
                     Command::DataTransmission(_) => {}
                 }
                 self.notice = match command {
@@ -500,11 +510,25 @@ impl App {
         elapsed: Duration,
         send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
     ) {
+        self.event_log.advance(elapsed);
         self.ticker_navigation.elapsed = elapsed;
         if self.overlay != Overlay::SymbolEntry
             && let Some(symbol) = self.ticker_navigation.due()
         {
             self.submit(Command::Symbol(symbol), send);
+        }
+        let edits = &self.effect_edits;
+        let event_log = &mut self.event_log;
+        if let Err(error) = self.activity.advance(elapsed, &mut |event| {
+            let event = SfxEvent {
+                edits: edits.get(&event.kind).copied().unwrap_or_default(),
+                ..event
+            };
+            send(Command::Trigger(event))?;
+            event_log.record(events::EventSource::Simulator, event);
+            Ok(())
+        }) {
+            self.notice = format!("User activity pending: {error}");
         }
     }
 
@@ -569,6 +593,7 @@ impl App {
         };
         controls.extend([
             Control::Symbol,
+            Control::ToggleUserActivity,
             Control::ToggleMute,
             Control::Reset,
             Control::Quit,
@@ -714,6 +739,15 @@ impl App {
                 }
                 .into();
             }
+            Control::ToggleUserActivity => {
+                self.activity.toggle();
+                self.notice = if self.activity.enabled() {
+                    "User activity enabled. Spatial terminal interactions with occasional orders."
+                } else {
+                    "User activity paused."
+                }
+                .into();
+            }
             Control::Tab(tab) => self.select_tab(tab),
             Control::SetMode(mode) => {
                 self.submit(Command::Mode(mode), send);
@@ -786,6 +820,7 @@ impl App {
                 self.event_pan = Pan::CENTER;
                 self.event_intensity = Unit::new(0.6).expect("constant intensity is normalized");
                 self.ticker_navigation.enable(self.symbol);
+                self.activity.reset();
                 self.notice =
                     "Controls reset to startup values. Audio tails continue naturally.".into();
             }
@@ -1250,6 +1285,7 @@ impl App {
                 return self.activate(Control::Inspect, send);
             }
             KeyCode::Char('t') => return self.activate(Control::Symbol, send),
+            KeyCode::Char('u') => return self.activate(Control::ToggleUserActivity, send),
             KeyCode::Char('m') => {
                 return self.activate(Control::ToggleMute, send);
             }

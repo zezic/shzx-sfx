@@ -545,6 +545,7 @@ pub struct Mix {
     pub demonic_stutters: Unit,
     pub flying_coins: Unit,
     pub laser_beams: Unit,
+    /// UI/event master attenuation shared by the dry sound and wet return.
     pub ui: Unit,
     pub transmission: Unit,
     pub reverb: Unit,
@@ -564,7 +565,7 @@ impl Default for Mix {
             demonic_stutters: Unit(0.2),
             flying_coins: Unit(0.05),
             laser_beams: Unit(0.05),
-            ui: Unit(0.40),
+            ui: Unit(0.316_227_76),
             transmission: Unit(0.10),
             reverb: Unit(0.5),
         }

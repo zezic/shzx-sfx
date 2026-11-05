@@ -908,6 +908,8 @@ fn tonal_rate_endpoint_edits_preserve_the_other_endpoint_and_reset_to_the_palett
 fn automatic_tickers_reproduce_and_switch_once_per_random_deadline() {
     let mut first = app();
     let mut second = app();
+    first.activity.toggle();
+    second.activity.toggle();
     let mut previous = Duration::ZERO;
     let mut symbols = std::collections::HashSet::new();
     let mut intervals = std::collections::BTreeSet::new();
@@ -946,6 +948,7 @@ fn automatic_tickers_reproduce_and_switch_once_per_random_deadline() {
 #[test]
 fn automatic_tickers_retry_pending_choices_and_reschedule_accepted_manual_selections() {
     let mut app = app();
+    app.activity.toggle();
     let initial = app.symbol;
     let pending = app.ticker_navigation.next.unwrap();
     app.advance(pending.at, &mut |_| Err(shzx_sfx::Error::QueueFull));
@@ -992,6 +995,7 @@ fn automatic_tickers_retry_pending_choices_and_reschedule_accepted_manual_select
 #[test]
 fn automatic_ticker_toggle_reset_and_host_suspension_keep_a_single_live_schedule() {
     let mut app = app();
+    app.activity.toggle();
     app.focus = Control::ToggleTickerNavigation;
     app.key(key(KeyCode::Enter, KeyEventKind::Press), &mut |_| {
         panic!("toggling navigation sends no audio command")
@@ -1011,6 +1015,7 @@ fn automatic_ticker_toggle_reset_and_host_suspension_keep_a_single_live_schedule
     assert_eq!(app.ticker_navigation.remaining(), None);
     app.activate(Control::Reset, &mut |_| Ok(()));
     assert!(app.ticker_navigation.remaining().is_some());
+    app.activity.toggle();
     let later = resumed + Duration::from_secs(3_600);
     let mut sent = Vec::new();
     app.advance(later, &mut |command| {
@@ -1073,4 +1078,156 @@ fn harmony_buttons_apply_only_accepted_modes_and_reset_restores_the_startup_mode
     });
     assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
     assert!(accepted.contains(&Command::Harmony(HarmonyMode::Dissonant)));
+}
+
+#[test]
+fn user_activity_starts_on_and_mouse_keyboard_and_reset_control_its_lifetime() {
+    let mut app = app();
+    assert!(app.activity.enabled());
+    let mut silent = |_| panic!("the simulator toggle sends no immediate audio command");
+    for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+        app.key(key(KeyCode::Char('u'), kind), &mut silent);
+        assert!(app.activity.enabled());
+    }
+    app.key(key(KeyCode::Char('u'), KeyEventKind::Press), &mut silent);
+    assert!(!app.activity.enabled());
+    app.advance(Duration::from_secs(3_600), &mut |command| {
+        assert!(!matches!(command, Command::Trigger(_)));
+        Ok(())
+    });
+    app.focus = Control::ToggleUserActivity;
+    app.key(key(KeyCode::Enter, KeyEventKind::Press), &mut silent);
+    assert!(app.activity.enabled());
+    app.click(Control::ToggleUserActivity, &mut silent);
+    assert!(!app.activity.enabled());
+
+    app.activate(Control::Reset, &mut |_| Err(shzx_sfx::Error::QueueFull));
+    assert!(!app.activity.enabled());
+    app.activate(Control::Reset, &mut |_| Ok(()));
+    assert!(app.activity.enabled());
+    let mut events = Vec::new();
+    app.advance(Duration::from_secs(3_602), &mut |command| {
+        if let Command::Trigger(event) = command {
+            events.push(event);
+        }
+        Ok(())
+    });
+    assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn simulated_events_use_sound_edits_and_preserve_the_manual_audition_and_editor() {
+    let mut app = app();
+    app.effect = SfxKind::Confirm;
+    app.event_pan = Pan::new(0.9).unwrap();
+    app.event_intensity = Unit::ONE;
+    app.inspector_layer = SfxLayer::Tonal;
+    app.activate(Control::EditLayer(SfxLayer::Tonal), &mut |_| Ok(()));
+    let mut edits = SfxEdits::default();
+    edits.pitch = SfxScale::new(0.7).unwrap();
+    for kind in SfxKind::iter() {
+        app.effect_edits.insert(kind, edits);
+    }
+    let before = (
+        app.effect,
+        app.event_pan,
+        app.event_intensity,
+        app.focus,
+        app.overlay,
+        app.mode,
+        app.market,
+    );
+    assert!(app.activity.enabled());
+    let notice = app.notice.clone();
+    let mut events = Vec::new();
+    for tick in 0..250 {
+        app.advance(Duration::from_millis(tick * 80), &mut |command| {
+            if let Command::Trigger(event) = command {
+                events.push(event);
+            }
+            Ok(())
+        });
+    }
+    assert!(events.len() > 10);
+    assert!(events.iter().all(|event| {
+        event.edits == edits
+            && event.layers == SfxLayerSelection::All
+            && event.intensity != Unit::ONE
+    }));
+    assert!(events.iter().any(|event| event.pan != app.event_pan));
+    assert_eq!(
+        before,
+        (
+            app.effect,
+            app.event_pan,
+            app.event_intensity,
+            app.focus,
+            app.overlay,
+            app.mode,
+            app.market,
+        )
+    );
+    assert_eq!(app.notice, notice);
+}
+
+#[test]
+fn event_log_records_accepted_simulator_and_manual_events_once_with_their_parameters() {
+    let mut app = app();
+    assert_eq!(app.event_log.entries().len(), 0);
+    let mut rejected = None;
+    app.advance(Duration::from_secs(2), &mut |command| {
+        if let Command::Trigger(event) = command {
+            rejected = Some(event);
+        }
+        Err(shzx_sfx::Error::QueueFull)
+    });
+    assert!(rejected.is_some());
+    assert_eq!(app.event_log.entries().len(), 0);
+
+    let retried_at = Duration::from_millis(2_080);
+    app.advance(retried_at, &mut |_| Ok(()));
+    let entry = app.event_log.entries().next().unwrap();
+    assert_eq!(entry.at, retried_at);
+    assert_eq!(entry.source, events::EventSource::Simulator);
+    assert_eq!(Some(entry.event), rejected);
+
+    app.event_pan = Pan::new(-0.8).unwrap();
+    app.event_intensity = Unit::new(0.7).unwrap();
+    app.fire(SfxKind::Click, &mut |_| Err(shzx_sfx::Error::QueueFull));
+    assert_eq!(app.event_log.entries().len(), 1);
+    app.fire(SfxKind::Click, &mut |_| Ok(()));
+    assert_eq!(app.event_log.entries().len(), 2);
+    let entry = app.event_log.entries().next_back().unwrap();
+    assert_eq!(entry.at, retried_at);
+    assert_eq!(entry.source, events::EventSource::User);
+    assert_eq!(
+        entry.event,
+        app.event(SfxKind::Click, SfxLayerSelection::All)
+    );
+}
+
+#[test]
+fn event_log_retains_a_bounded_recent_history_across_pause_and_reset() {
+    let mut app = app();
+    app.activity.toggle();
+    for second in 0..140 {
+        app.advance(Duration::from_secs(second), &mut |_| Ok(()));
+        app.fire(SfxKind::Click, &mut |_| Ok(()));
+    }
+    let entries: Vec<_> = app.event_log.entries().collect();
+    assert_eq!(entries.len(), 128);
+    assert_eq!(entries.first().unwrap().at, Duration::from_secs(12));
+    assert_eq!(entries.last().unwrap().at, Duration::from_secs(139));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.source == events::EventSource::User)
+    );
+
+    app.activate(Control::Reset, &mut |_| Ok(()));
+    assert_eq!(app.event_log.entries().len(), 128);
+    assert_eq!(
+        app.event_log.entries().next_back().unwrap().at,
+        Duration::from_secs(139)
+    );
 }

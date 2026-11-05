@@ -299,6 +299,9 @@ path supplies brief 1.6-3.3 kHz HP / 12-17 kHz LP flecks at 7-15% level. Bright 
 end within milliseconds. After the one-second startup glide, main pitch is
 fixed or settles at onset.
 
+Warning, error, and the three order signatures use an additional 3 dB of
+source attenuation, shared by all six layers before the dry/reverb split.
+
 Distant melody notes are chosen uniformly from C5..B5 (MIDI 72..83), covering
 all twelve chromatic pitch classes independently of the chord and pedal's
 A-natural-minor collection. They use a smooth three-second attack and
@@ -306,7 +309,7 @@ eight-second decay, for an eleven-second source envelope. Their oscillator
 frequency has +/-2.5% vibrato at 4.3 Hz, with phase derived from note age for
 reproducible rendering. The first entrance is scheduled seven seconds after
 startup, with at least eleven seconds between later entrances. The melody
-mixer defaults to 8%, and the UI/event mixer defaults to 40%.
+mixer defaults to 8%, and the UI/event mixer defaults to -10 dB (31.6%).
 
 Melody and its existing ping-pong delay feed a dedicated reverb, with defaults
 of 95% send, 88% room, 68% damping, 92% width, and 85% wet. A 2.5% dry gain

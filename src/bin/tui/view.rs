@@ -479,6 +479,48 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             hits,
         );
     }
+    let log_top = inner.y + 5 + ticker_choices().count().div_ceil(columns.len()) as u16;
+    let log_height = inner.bottom().saturating_sub(log_top);
+    if log_height >= 2 {
+        user_events(
+            frame,
+            Rect::new(inner.x, log_top, inner.width, log_height),
+            app,
+        );
+    }
+}
+
+fn user_events(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(
+        Paragraph::new("USER EVENTS / latest")
+            .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let entries = app.event_log.entries();
+    if entries.len() == 0 {
+        frame.render_widget(
+            Paragraph::new("No user events yet.").style(Style::default().fg(DIM)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+        return;
+    }
+    let visible = entries.len().min(usize::from(area.height - 1));
+    let skipped = entries.len() - visible;
+    let first_row = area.bottom() - visible as u16;
+    for (index, entry) in entries.skip(skipped).enumerate() {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{:7.2}s {:4} {:<18} pan {:+.2} / {:3.0}%",
+                entry.at.as_secs_f64(),
+                entry.source.label(),
+                entry.event.kind,
+                entry.event.pan.get(),
+                entry.event.intensity.get() * 100.0,
+            ))
+            .style(Style::default().fg(TEXT)),
+            Rect::new(area.x, first_row + index as u16, area.width, 1),
+        );
+    }
 }
 
 struct SliderValue {
@@ -1786,22 +1828,45 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             },
         ),
         (Control::Reset, "[ Reset (r) ]"),
+        (
+            Control::ToggleUserActivity,
+            if app.activity.enabled() {
+                "[ User sim ON (u) ]"
+            } else {
+                "[ User sim OFF (u) ]"
+            },
+        ),
         (Control::Quit, "[ Quit (q) ]"),
     ] {
         let rectangle = Rect::new(x, area.y + 1, label.len() as u16, 1);
         frame.render_widget(
-            Paragraph::new(label).style(Style::default().fg(CYAN).bg(if app.focus == control {
-                FOCUSED
-            } else {
-                BACKGROUND
-            })),
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(
+                        if control == Control::ToggleUserActivity && app.activity.enabled() {
+                            AMBER
+                        } else {
+                            CYAN
+                        },
+                    )
+                    .bg(if app.focus == control {
+                        FOCUSED
+                    } else {
+                        BACKGROUND
+                    }),
+            ),
             rectangle,
         );
         hits.add(rectangle, control);
         x += rectangle.width + 1;
     }
+    let hint = if app.activity.enabled() {
+        app.activity.description()
+    } else {
+        "Mouse: click / drag"
+    };
     frame.render_widget(
-        Paragraph::new("Mouse: click controls / drag bars").style(Style::default().fg(DIM)),
+        Paragraph::new(hint).style(Style::default().fg(DIM)),
         Rect::new(x + 1, area.y + 1, area.right().saturating_sub(x + 1), 1),
     );
 }
@@ -1827,7 +1892,7 @@ fn small_terminal(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMa
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
     let width = area.width.min(76);
-    let height = area.height.min(20);
+    let height = area.height.min(24);
     let rectangle = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -1863,6 +1928,8 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
             Line::raw("M mute/unmute master   R reset scene   Q quit"),
+            Line::raw("U toggle user simulator (starts ON): an abstract trading terminal."),
+            Line::raw("Spatial, humanized hovers, scrolls and actions; orders are rare."),
             Line::raw("? help   Esc or ? closes this help"),
             Line::raw(""),
             Line::styled(
@@ -2921,6 +2988,9 @@ mod tests {
     fn ticker_navigation_toggle_and_countdown_share_the_grid_heading_at_all_sizes() {
         for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
             let mut app = app();
+            if app.activity.enabled() {
+                app.activity.toggle();
+            }
             let initial = app.ticker_navigation.remaining().unwrap();
             app.advance(std::time::Duration::from_secs(1), &mut |_| {
                 panic!("the first ticker interval is at least 25 seconds")
@@ -2969,6 +3039,163 @@ mod tests {
                 .map(|position| terminal.backend().buffer()[position].symbol())
                 .collect::<String>();
             assert!(text.contains("auto tickers default ON; random 25..180s"));
+        }
+    }
+
+    #[test]
+    fn scene_event_log_uses_spare_rows_below_tickers_and_follows_the_latest_events() {
+        use shzx_sfx::SfxEvent;
+        use std::time::Duration;
+
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            let mut app = app();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+            let title_row = hits
+                .region(Control::PickSymbol(ticker_choices().last().unwrap()))
+                .unwrap()
+                .y
+                + 1;
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            if (width, height) == (80, 24) {
+                assert!(!text.contains("USER EVENTS"));
+            } else {
+                assert!(text.contains("USER EVENTS / latest"));
+                assert!(text.contains("No user events yet."));
+            }
+            for index in 0..40 {
+                app.event_log.advance(Duration::from_secs(index));
+                app.submit(
+                    Command::Trigger(SfxEvent {
+                        kind: if index == 39 {
+                            SfxKind::Confirm
+                        } else {
+                            SfxKind::Click
+                        },
+                        pan: Pan::new(-0.65).unwrap(),
+                        intensity: Unit::new(0.42).unwrap(),
+                        ..SfxEvent::new(SfxKind::Click)
+                    }),
+                    &mut |_| Ok(()),
+                );
+            }
+            terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+            if (width, height) == (80, 24) {
+                continue;
+            }
+            let bottom_row = height - if width >= 140 { 9 } else { 11 };
+            let log = Rect::new(
+                1,
+                title_row,
+                if width >= 140 {
+                    (width * 11 / 20).max(80).min(width - 59) - 2
+                } else {
+                    width - 2
+                },
+                bottom_row - title_row + 1,
+            );
+            assert!(hits.0.iter().all(|hit| !hit.area.intersects(log)));
+            let row = |y| {
+                (log.x..log.right())
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(title_row).contains("USER EVENTS / latest"));
+            let latest = row(bottom_row);
+            for expected in ["39.00s", "USER", "confirm", "pan -0.65", "42%"] {
+                assert!(
+                    latest.contains(expected),
+                    "missing {expected:?} at {width}x{height}: {latest}"
+                );
+            }
+            let visible = bottom_row - title_row;
+            let first = 40 - u64::from(visible);
+            assert!(row(title_row + 1).contains(&format!("{first:.2}s", first = first as f64)));
+            let log_text = (title_row + 1..=bottom_row)
+                .map(row)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!log_text.contains("  0.00s"));
+            let monitor_row = if width >= 140 { 4 } else { height - 9 };
+            let monitor = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, monitor_row)].symbol())
+                .collect::<String>();
+            assert!(
+                monitor.contains("BACKGROUND MONITOR"),
+                "{width}x{height}: {monitor}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_activity_toggle_stays_visible_and_accessible_at_all_supported_sizes() {
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            let mut app = app();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for enabled in [true, false, true] {
+                assert_eq!(app.activity.enabled(), enabled);
+                for tab in Tab::ALL {
+                    app.select_tab(tab);
+                    let mut hits = HitMap::default();
+                    terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+                    let control = Control::ToggleUserActivity;
+                    let target = hits
+                        .region(control)
+                        .expect("user simulator toggle is visible");
+                    assert_eq!(target.y, height - 1);
+                    assert!(target.right() <= width);
+                    assert_eq!(hits.at(target.x, target.y), Some(control));
+                    assert!(app.focus_order().contains(&control));
+                    assert_eq!(
+                        terminal.backend().buffer()[(target.x, target.y)].fg,
+                        if enabled { AMBER } else { CYAN }
+                    );
+                    let row = (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, target.y)].symbol())
+                        .collect::<String>();
+                    let expected = if enabled {
+                        "User sim ON"
+                    } else {
+                        "User sim OFF"
+                    };
+                    assert!(row.contains(expected), "{width}x{height}: {row}");
+                    assert!(row.contains("Quit (q)"), "{width}x{height}: {row}");
+                }
+                app.activate(Control::ToggleUserActivity, &mut |_| {
+                    panic!("toggling the user simulator is local")
+                });
+            }
+            app.overlay = Overlay::Help;
+            terminal
+                .draw(|frame| {
+                    draw(frame, &app);
+                })
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for expected in [
+                "U toggle user simulator (starts ON)",
+                "abstract trading terminal",
+                "orders are rare",
+                "Esc or ? closes this help",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}"
+                );
+            }
         }
     }
 
