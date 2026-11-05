@@ -510,10 +510,11 @@ or all the other EE-ending letter names. /l,r,w,y/ additionally need their
 own resonant transitions. [Macquarie: Sound sources](https://www.mq.edu.au/faculty-of-medicine-health-and-human-sciences/departments-and-schools/department-of-linguistics/our-research/phonetics-and-phonology/speech/acoustics/acoustic-theory-of-speech-production/sound-sources-in-the-vocal-tract),
 [Approximants](https://www.mq.edu.au/faculty-of-medicine-health-and-human-sciences/departments-and-schools/department-of-linguistics/our-research/phonetics-and-phonology/speech/acoustics/speech-acoustics/approximants)
 
-The occasional 0.67..1.33 formant multiplier is an effect setting,
-not a phonetic norm. Apply it continuously to the current vowel trajectory,
-keep frequency order and valid sample-rate limits, and preserve the seeded
-trajectory over an utterance. Two preallocated voices can alternate ticker
+The occasional formant excursion stays between -6% and +2%, preserving the
+reference-shaped register while allowing subtle movement. This is an effect
+setting, not a phonetic norm. Apply it continuously to the current vowel
+trajectory, keep frequency order and valid sample-rate limits, and preserve
+the seeded trajectory over an utterance. Two preallocated voices can alternate ticker
 letters, take opposite Haas positions when overlapping, and share the
 brighter Accents reverb with the high-register formations. Stutter gating at
 3..20 Hz should preserve the underlying articulation clock while rate and
@@ -578,23 +579,34 @@ not the resulting acoustic formant level.
 [Klatt, 1980, pp. 980-982: original paper](https://www.source-code.biz/klattSyn/Klatt-1980.pdf)
 
 The current Low and High profiles are synthesis variants, not demographic
-speaker models. A, O, and U use reference-shaped spectral envelopes; the
-other vowel centers retain the English-whisper anchors above, including the
-AY-onset and schwa blends. Their bandwidths and relative levels are tuned
-per vowel. The rounded vowels emphasize a low, narrow principal resonance
-with weak upper detail; A retains stronger upper structure.
+speaker models. A, O, and U use reference-shaped spectral envelopes; other
+vowels use the English-whisper anchors above as starting points. The higher
+UH and schwa variants keep their first resonance below the open A's register.
+Widths and relative levels are tuned per vowel. The rounded vowels emphasize
+a low, narrow principal resonance with weak upper detail, including a faint
+band near 3.7 kHz; A retains stronger upper structure. Voices and stutters
+use the same shapes and register limits.
 [Demonic voices: reference analysis and tuning](demonic-voices-research.md)
 
 Each `VocalShape` has three principal formants and optional low, body, and
-upper bands. These support low-frequency texture, small resonances, and broad
-shoulders between peaks without adding an unfiltered noise floor. Every
+two upper bands. These support low-frequency texture, small resonances, and
+broad shoulders between peaks without adding an unfiltered noise floor. Every
 active branch uses two cascaded, peak-normalized second-order bandpasses.
 The nominal bandwidth parameter applies to each section and approximates
 its half-power width for narrow bands. Broad-band peak positions and widths
 need calibration against the actual response. The combined branch is
-narrower and has steeper skirts. All six branch slots and their filter states
+narrower and has steeper skirts. All seven branch slots and their filter states
 are bounded and preallocated. Consonant shapes use three principal bands
 with 0/-6/-12 dB targets.
+
+Each principal branch also has two narrow, low-gain bell boosts on opposing
+flanks. Their seeded positions sit 0.4..0.95 nominal bandwidths from the
+principal center, widths are 8..60 Hz, and boosts are 0.8..1.8 dB. They add
+fine local structure while preserving the principal resonance settings. Movement stays
+within 0.04 bandwidths and follows the existing flutter phase, with an
+independent phase offset per detail. A domain-separated clone of the voice's
+random state chooses these parameters without consuming the excitation or
+scheduler sequence. All ripple filters are preallocated with the voice.
 
 Frequency, section bandwidth, and peak targets interpolate within the final
 30 ms of each phone, capped at 55% of very short phones. An optional band
@@ -603,6 +615,12 @@ and fades in linear amplitude through the same transition. Branch gains
 smooth over 5 ms. A square-root frequency correction compensates the ideal
 pink source's nominal power slope; branch calibration also accounts for the
 6200 Hz output low-pass response once for the complete branch.
+
+Branch gain fades below 42% of the sample rate across its nominal bandwidth,
+capped at 2% of the sample rate so broad shoulders remain useful. A band above
+that limit is silent; its center is not clamped downward. This keeps the added
+upper detail out of the lower spectrum at unsupported rates. Fine bell boosts
+fade smoothly to unity over their own bandwidth near the same limit.
 
 Soft clipping, the added sine, and coherent overlap between branches alter
 that ideal spectrum. Validate the resulting spectral envelope over sustained

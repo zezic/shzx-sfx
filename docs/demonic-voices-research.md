@@ -5,7 +5,48 @@ Analysis and tuning checked 2026-11-05. Reference:
 signed 16-bit PCM. The implementation fits its broad spectral characteristics
 without sampling the recording or reconstructing its production chain.
 
-## Result
+## Stable register and local detail
+
+Both murmurs and stutters use the calibrated voice path. Their occasional
+whole-tract excursion stays between -6% and +2%; the selected vowel's
+reference positions remain its anchor. Higher UH and schwa variants also
+keep their principal resonance below the A anchor. E/I retain the upper
+resonances needed for their vowel identity.
+
+Each principal branch has two narrow, seeded bell boosts on opposite flanks.
+Offsets are 0.4-0.95 nominal section bandwidths from the center, widths are
+0.08-0.16 of that bandwidth, limited to 8-60 Hz, and peak boosts are 0.8-1.8 dB.
+The existing flutter phase drives tiny independent movements of up to 0.04
+bandwidth. These create local contour without moving the principal resonator.
+Detail randomness comes from a cloned, separated seed, preserving the
+utterance and excitation random timeline. There is no new modulation clock
+or unfiltered noise layer.
+
+The rounded vowels also include a weak upper branch near 3.7 kHz. The
+reference's feature moves around 3.6-3.75 kHz and is about 5-8 dB below its
+2.75 kHz feature. At 44.1 kHz, seed 123, the detailed O has a peak near
+3741 Hz at -38.70 dB relative to its main peak, versus approximately
+3658 Hz/-39.34 dB in the reference. Power at 3.5-3.9 kHz is 0.0227%, versus
+0.0245% in the reference. The principal O peak remains 382 Hz, and its
+250-600 Hz power share remains about 97.1%.
+
+![Restrained register, upper detail, and fine spectral ripples](assets/demonic-voices-micro-detail.png)
+
+Branches fade to silence before their intended center exceeds 42% of the
+sample rate. The fade spans at most one nominal bandwidth or 2% of the
+sample rate, whichever is smaller. Unsupported upper detail therefore
+disappears instead of moving into a lower audible band. Ripple boosts also
+fade toward unity at the same frequency limit. Broad supporting bands retain
+their intended shape rather than being attenuated merely for having wide
+bandwidths.
+
+These measurements use 16384-point Welch spectra with 25 Hz Gaussian
+smoothing; the fine-detail panel uses 32768 points with 3 Hz smoothing. The
+broader 25 Hz envelope intentionally suppresses much of the microstructure.
+A new matched-RMS listening clip presents O and A murmurs, then O and A
+stutters: `target/voice-analysis/detailed-voices-and-stutters.wav`.
+
+## Reference calibration
 
 The rounded vowel now has a low, narrow main resonance, a much quieter
 secondary peak, two faint upper details, and a gently raised region between
@@ -52,10 +93,10 @@ and levels for each vowel are therefore central to this match.
 
 ## Filter design
 
-Each [voice](../src/background/voices.rs) owns six preallocated resonance
+Each [voice](../src/background/voices.rs) owns seven preallocated resonance
 branches. Every branch groups two cascaded peak-normalized bandpasses with
 its own smoothed gain. Three principal branches are accompanied by optional
-low, body, and upper bands, represented by `Option<Formant>`. Consonants and
+low and body bands and two upper bands, represented by `Option<Formant>`. Consonants and
 other vowels use the same mechanism without fabricated silent detail bands.
 The extra resonances do not create another audio layer or command path.
 
@@ -89,9 +130,9 @@ models. Actual Rust renders then determined the final A width and low-band
 level. The objective is broad envelope agreement; individual random FFT
 spikes are not targets.
 
-The A, O, and U presets follow these reference-derived shapes. Other vowel
-centers retain anchors from the published English-whisper study, with their
-own design widths and levels. Low and High identify synthesis variants,
+The A, O, and U presets follow these reference-derived shapes. Other vowels retain distinctions informed by the published English-whisper
+study, with their own design widths and levels; UH and schwa are kept in the
+approved principal-resonance register. Low and High identify synthesis variants,
 not demographic speaker measurements. The published fronted OO centers
 are not substituted for the rounded reference target.
 [Sharifzadeh et al.: original whisper study](https://lintech.org/webpapers/JVoice3Revised1.pdf).
@@ -115,8 +156,8 @@ Phone timing remains tied to English ticker-letter names. Frequencies,
 section bandwidths, and dB targets interpolate during the final 30 ms of a
 phone, capped at 55% for short phones. When an optional band appears or
 disappears, its present endpoint retains its frequency and width while its
-linear amplitude fades. All gains smooth over 5 ms. The existing seeded
-formant excursion, utterance envelope, and stutter clocks remain in use.
+linear amplitude fades. All gains smooth over 5 ms. The bounded seeded formant excursion, utterance envelope, and stutter clocks
+serve both delivery styles.
 
 Two slots retain their Haas positions and the Accents reverb routing.
 The reference also has channel-dependent spectral differences: its first
@@ -161,6 +202,9 @@ Generated local artifacts are in ignored `target/voice-analysis/`:
   Each region is scaled to -20 dBFS RMS before 15 ms edge fades. Equal RMS is
   not equal perceived loudness.
 - `audition-timeline.json`: exact comparison timestamps.
+- `detail-*.wav`: updated voice/stutter exports and sibling traces.
+- `micro-detail-analysis.py`, `micro-detail-metrics.json`, and
+  `detailed-voices-and-stutters.wav`: detail analysis and current audition.
 
 Example reproduction, with the local mixer script present:
 

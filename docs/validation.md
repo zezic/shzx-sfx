@@ -640,3 +640,43 @@ seconds: 6.230% to 6.346%, or 1.86% more wall time, with greater variation
 between idle runs. These measure offline throughput, not native callback
 CPU usage or scheduling. Raw runs and hashes are in
 `target/voice-analysis/paired-benchmarks.json`.
+
+
+## Restrained demonic register and micro resonances
+
+Checked 2026-11-05. Murmurs and stutters share the approved vowel shapes
+with occasional whole-tract motion limited to -6%..+2%. The higher UH and
+schwa principal resonances stay below the A anchor. Two small seeded bell
+boosts on opposite flanks of each principal branch add local contour, using
+the existing flutter phase for gentle movement. A seventh branch slot adds
+a faint rounded-vowel detail near 3.7 kHz. Unsupported branches fade out
+rather than being moved into another audible band.
+
+At 44.1 kHz, seed 123, the representative O's principal peak stays 382 Hz.
+Its 3.5-3.9 kHz power share changes from 0.01499% to 0.02273%, compared with
+0.02454% in the reference. Its new upper peak is 3741 Hz at -38.70 dB relative
+to the principal peak, versus 3658 Hz/-39.34 dB in the reference. Mean
+250-600 Hz power remains 97.11%. These figures use 16384-point Welch spectra
+with mean channel power and 25 Hz Gaussian smoothing. A separate 32768-point
+analysis with 3 Hz smoothing resolves small flanking ripples while the broad
+envelope stays anchored. Plot, methods, and local audio are linked from
+[the voice analysis](demonic-voices-research.md).
+
+All 11 voice unit tests pass. New checks cover live constructor-selected
+up/down excursions in both delivery styles, deterministic ripple impulse
+responses with limited peak/energy changes, and the 3.7 kHz branch at 44.1/48 kHz
+with exact silence at 8 kHz. Existing output-spectrum, articulation,
+extreme-rate retirement, stage-response, and excitation checks also pass. The full
+release headless suite reports 131 passed and the same four known unrelated
+sub/harmony failures recorded above. All 41 CLI/TUI tests and strict Clippy
+checks pass. Allocation-free rendering/commands, ambient determinism/gain,
+and reverb-tail integration tests pass.
+
+Two alternating paired runs per workload compare the frozen approved and
+detailed executables. For 30 seconds of audio, interactive mean wall time is
+2.187803 seconds before and 2.088201 after; idle is 1.890573 before and 1.908660
+after. These runs span roughly 6-7.3% of realtime wall time. Variation prevents
+attributing the apparent interactive improvement to the implementation. They
+measure offline throughput, not native callback CPU or scheduling. Hashes,
+raw runs, and means are in `target/voice-analysis/detail-paired-benchmarks.json`;
+test logs use the `detail-` prefix in the same directory.
