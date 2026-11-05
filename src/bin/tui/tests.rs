@@ -205,10 +205,12 @@ fn sliders_clamp_their_domains_and_local_audition_controls_send_no_audio_updates
     assert_eq!(app.market.zoom, Unit::ONE);
     app.adjust(Control::Market(MarketField::Zoom), -10.0, &mut send);
     assert_eq!(app.market.zoom, Unit::ZERO);
-    app.adjust(Control::Mix(MixLayer::Harmony), 10.0, &mut send);
-    assert_eq!(app.mix.harmony, Unit::ONE);
-    app.adjust(Control::Mix(MixLayer::Harmony), -10.0, &mut send);
-    assert_eq!(app.mix.harmony, Unit::ZERO);
+    for layer in MixLayer::ALL {
+        app.adjust(Control::Mix(layer), 10.0, &mut send);
+        assert_eq!(layer.get(app.mix), Unit::ONE);
+        app.adjust(Control::Mix(layer), -10.0, &mut send);
+        assert_eq!(layer.get(app.mix), Unit::ZERO);
+    }
     let submitted = commands.len();
 
     let mut local_send = |command| {
@@ -327,6 +329,24 @@ fn output_boost_and_independent_reverb_sends_obey_input_and_queue_contracts() {
     assert_eq!(app.reverb.environment, before_melody.environment);
     assert_eq!(app.reverb.events, before_melody.events);
     assert_eq!(app.reverb.transmission, before_melody.transmission);
+    assert_eq!(app.reverb.accents, before_melody.accents);
+    let before_accents = app.reverb;
+    app.adjust(
+        Control::Reverb(ReverbBus::Accents, ReverbField::Send),
+        -0.15,
+        &mut send,
+    );
+    app.adjust(
+        Control::Reverb(ReverbBus::Accents, ReverbField::Damping),
+        0.10,
+        &mut send,
+    );
+    assert!((app.reverb.accents.send.get() - 0.70).abs() < 0.00001);
+    assert!((app.reverb.accents.damping.get() - 0.18).abs() < 0.00001);
+    assert_eq!(app.reverb.environment, before_accents.environment);
+    assert_eq!(app.reverb.events, before_accents.events);
+    assert_eq!(app.reverb.transmission, before_accents.transmission);
+    assert_eq!(app.reverb.melody, before_accents.melody);
     assert_eq!(commands.last(), Some(&Command::Reverb(app.reverb)));
     assert!(
         commands

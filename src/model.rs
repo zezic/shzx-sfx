@@ -494,6 +494,14 @@ pub struct DelaySnapshot {
     pub send: ParameterSnapshot,
 }
 
+/// Activity and the next entrance of an autonomous environment source.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct AmbientSnapshot {
+    pub generated: u64,
+    pub active: usize,
+    pub clock: ClockState,
+}
+
 /// Current environment state, destinations, and autonomous arrangement clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct BackgroundSnapshot {
@@ -509,6 +517,10 @@ pub struct BackgroundSnapshot {
     pub harmonic_swell: Unit,
     pub details: DetailSnapshot,
     pub melody: MelodySnapshot,
+    pub demonic_voices: AmbientSnapshot,
+    pub demonic_stutters: AmbientSnapshot,
+    pub flying_coins: AmbientSnapshot,
+    pub laser_beams: AmbientSnapshot,
     pub detail_delay: DelaySnapshot,
     pub melody_delay: DelaySnapshot,
 }
@@ -524,6 +536,10 @@ pub struct Mix {
     pub texture: Unit,
     pub harmony: Unit,
     pub melody: Unit,
+    pub demonic_voices: Unit,
+    pub demonic_stutters: Unit,
+    pub flying_coins: Unit,
+    pub laser_beams: Unit,
     pub ui: Unit,
     pub transmission: Unit,
     pub reverb: Unit,
@@ -539,6 +555,10 @@ impl Default for Mix {
             texture: Unit(0.45),
             harmony: Unit(0.55),
             melody: Unit(0.08),
+            demonic_voices: Unit(0.10),
+            demonic_stutters: Unit(0.18),
+            flying_coins: Unit(0.075),
+            laser_beams: Unit(0.05),
             ui: Unit(0.40),
             transmission: Unit(0.22),
             reverb: Unit(0.5),
@@ -565,6 +585,7 @@ pub struct ReverbSettings {
     pub events: ReverbParameters,
     pub transmission: ReverbParameters,
     pub melody: ReverbParameters,
+    pub accents: ReverbParameters,
 }
 
 impl Default for ReverbSettings {
@@ -597,6 +618,13 @@ impl Default for ReverbSettings {
                 damping: Unit(0.68),
                 width: Unit(0.92),
                 wet: Unit(0.85),
+            },
+            accents: ReverbParameters {
+                send: Unit(0.85),
+                room_size: Unit(0.88),
+                damping: Unit(0.08),
+                width: Unit(0.92),
+                wet: Unit(0.32),
             },
         }
     }

@@ -7,10 +7,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use shzx_sfx::{
-    AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState, DelaySnapshot,
-    GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer, SfxLayerRecipe,
-    SfxLayerSelection, SfxLayerState, SfxLayerStereo, SfxModulation, SfxRecipe, Snapshot,
-    SpatialMode, Trend, Unit,
+    AmbientSnapshot, AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState,
+    DelaySnapshot, GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer,
+    SfxLayerRecipe, SfxLayerSelection, SfxLayerState, SfxLayerStereo, SfxModulation, SfxRecipe,
+    Snapshot, SpatialMode, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -455,7 +455,11 @@ fn slider(
         (value.display.len() as u16 + 4).max(10)
     };
     let bar_padding = if area.width < 32 { 6 } else { 7 };
-    let label_chars = 16.min(area.width.saturating_sub(value_width + bar_padding)) as usize;
+    let label_chars = if label.is_empty() {
+        0
+    } else {
+        16.min(area.width.saturating_sub(value_width + bar_padding)) as usize
+    };
     let label_width = label_chars as u16 + 3;
     let bar_width = area.width.saturating_sub(label_width + value_width);
     let filled = (value.position.clamp(0.0, 1.0) * bar_width as f32).round() as usize;
@@ -537,18 +541,17 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             MixLayer::Texture => "Noise / glitches",
             MixLayer::Harmony => "Harmony",
             MixLayer::Melody => "Distant melody",
+            MixLayer::DemonicVoices => "Demonic voices",
+            MixLayer::DemonicStutters => "Demonic stutters",
+            MixLayer::FlyingCoins => "Flying coins",
+            MixLayer::LaserBeams => "Laser beams",
             MixLayer::Ui => "UI / events",
             MixLayer::Transmission => "Transmission",
             MixLayer::Reverb => "Reverb return",
         };
         slider(
             frame,
-            Rect::new(
-                column.x,
-                column.y + 1 + (index % rows) as u16,
-                column.width,
-                1,
-            ),
+            Rect::new(column.x, column.y + (index % rows) as u16, column.width, 1),
             label,
             value,
             Control::Mix(layer),
@@ -561,7 +564,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
         .expect("output gain is numeric");
     slider(
         frame,
-        Rect::new(inner.x, inner.y + rows as u16 + 2, inner.width, 1),
+        Rect::new(inner.x, inner.y + rows as u16 + 1, inner.width, 1),
         "Output gain",
         SliderValue {
             position: (gain - low) / (high - low),
@@ -582,7 +585,19 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
 
 fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let inner = panel(frame, area, " REVERB / Independent FX spaces ");
-    let columns = buttons::<4>(Rect::new(inner.x, inner.y, inner.width, inner.height));
+    let label_width = if inner.width >= 140 { 14 } else { 6 };
+    let columns = buttons::<5>(Rect::new(
+        inner.x + label_width,
+        inner.y,
+        inner.width - label_width,
+        inner.height,
+    ));
+    for (index, field) in ReverbField::ALL.into_iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(field.label(label_width)).style(Style::default().fg(DIM)),
+            Rect::new(inner.x, inner.y + 2 + index as u16, label_width, 1),
+        );
+    }
     for (bus, column) in ReverbBus::ALL.into_iter().zip(columns) {
         frame.render_widget(
             Paragraph::new(bus.label().to_ascii_uppercase())
@@ -594,7 +609,7 @@ fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             slider(
                 frame,
                 Rect::new(column.x, column.y + 2 + index as u16, column.width, 1),
-                field.label(column.width),
+                "",
                 SliderValue::percent(field.get(parameters)),
                 Control::Reverb(bus, field),
                 app,
@@ -1167,7 +1182,7 @@ fn compact_ratio(value: f32) -> String {
 }
 
 fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let inner = panel(frame, area, " MONITOR / Background response ");
+    let inner = panel(frame, area, " MONITOR / Background NOW > TARGET ");
     let Some(snapshot) = app.snapshot else {
         frame.render_widget(
             Paragraph::new(
@@ -1181,16 +1196,15 @@ fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let background = snapshot.background;
     let left_width = inner.width / 2;
-    let left = Rect::new(inner.x, inner.y, left_width, 5);
+    let left = Rect::new(inner.x, inner.y, left_width, 3);
     let right = Rect::new(
         inner.x + left_width + 1,
         inner.y,
         inner.width - left_width - 1,
-        5,
+        3,
     );
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled("GRAPH NOW > TARGET", Style::default().fg(DIM)),
             Line::raw(format!(
                 "Trend {}>{} | strength {}",
                 trend_short(background.market.trend),
@@ -1210,19 +1224,19 @@ fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 unit_pair(background.market.zoom, snapshot.market.zoom),
                 unit_pair(background.market.activity, snapshot.market.activity)
             )),
-            Line::styled(
-                format!("{GLOBAL_SCALE} | {}", root_text(&snapshot)),
-                Style::default().fg(DIM),
-            ),
         ]),
         left,
     );
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled("ENVIRONMENT NOW > TARGET", Style::default().fg(DIM)),
             Line::raw(focus_room_text(background.focus, background.reverb_room)),
-            parameter("Low-pass", background.lowpass_hz, hz),
-            parameter("High-pass", background.highpass_hz, hz),
+            Line::raw(format!(
+                "LP {:.0} Hz>{:.0} Hz | HP {:.0}>{:.0}",
+                background.lowpass_hz.current,
+                background.lowpass_hz.target,
+                background.highpass_hz.current,
+                background.highpass_hz.target
+            )),
             Line::raw(format!(
                 "Width {:.0}>{:.0}% | swell {:.0}% | {}",
                 background.reverb_width.current * 100.0,
@@ -1235,10 +1249,14 @@ fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(arrangement_lines(&snapshot, inner.width).to_vec()),
-        Rect::new(inner.x, inner.y + 5, inner.width, 4),
+        Rect::new(inner.x, inner.y + 3, inner.width, 4),
     );
     frame.render_widget(
         Paragraph::new(delay_lines(&snapshot).to_vec()),
+        Rect::new(inner.x, inner.y + 7, inner.width, 2),
+    );
+    frame.render_widget(
+        Paragraph::new(ambient_lines(&snapshot).to_vec()),
         Rect::new(inner.x, inner.y + 9, inner.width, 2),
     );
 
@@ -1323,6 +1341,26 @@ fn arrangement_lines(snapshot: &Snapshot, width: u16) -> [Line<'static>; 4] {
     ]
 }
 
+fn ambient_text(label: &str, source: AmbientSnapshot) -> String {
+    format!("{label} {} / {}", source.active, clock_short(source.clock))
+}
+
+fn ambient_lines(snapshot: &Snapshot) -> [Line<'static>; 2] {
+    let state = snapshot.background;
+    [
+        Line::raw(format!(
+            "{} | {}",
+            ambient_text("Demonic voices", state.demonic_voices),
+            ambient_text("Stutters", state.demonic_stutters),
+        )),
+        Line::raw(format!(
+            "{} | {}",
+            ambient_text("Flying coins", state.flying_coins),
+            ambient_text("Lasers", state.laser_beams),
+        )),
+    ]
+}
+
 fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let inner = panel(frame, area, " BACKGROUND MONITOR / NOW > TARGET ");
     let Some(snapshot) = app.snapshot else {
@@ -1351,17 +1389,17 @@ fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
             background.harmonic_swell.get() * 100.0
         )),
     ];
-    for field in [
-        MarketField::Volume,
-        MarketField::Volatility,
-        MarketField::Zoom,
-        MarketField::Activity,
+    for [first, second] in [
+        [MarketField::Volume, MarketField::Volatility],
+        [MarketField::Zoom, MarketField::Activity],
     ] {
-        lines.push(comparison(
-            field.label(),
-            percent(field.get(background.market).get()),
-            percent(field.get(snapshot.market).get()),
-        ));
+        lines.push(Line::raw(format!(
+            "{} {} | {} {}",
+            first.label(),
+            unit_pair(first.get(background.market), first.get(snapshot.market)),
+            second.label(),
+            unit_pair(second.get(background.market), second.get(snapshot.market)),
+        )));
     }
     lines.extend([
         Line::raw(format!(
@@ -1376,6 +1414,7 @@ fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ]);
     lines.extend(arrangement_lines(&snapshot, inner.width));
     lines.extend(delay_lines(&snapshot));
+    lines.extend(ambient_lines(&snapshot));
     if inner.height > 17 {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1400,20 +1439,23 @@ fn monitor_strip(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lines = vec![
         Line::styled(
             format!(
-                "MONITOR NOW>TARGET | trend {}>{} | str {} | vol {}",
-                state.market.trend,
-                snapshot.market.trend,
-                unit_pair(state.market.trend_strength, snapshot.market.trend_strength),
-                unit_pair(state.market.volume, snapshot.market.volume)
+                "MONITOR NOW>TARGET | zoom {} | vol {} | activity {}",
+                unit_pair(state.market.zoom, snapshot.market.zoom),
+                unit_pair(state.market.volume, snapshot.market.volume),
+                unit_pair(state.market.activity, snapshot.market.activity)
             ),
             Style::default().fg(CYAN),
         ),
         Line::raw(format!(
-            "Volatility {} | zoom {} | activity {} | swell {:.0}%",
-            unit_pair(state.market.volatility, snapshot.market.volatility),
-            unit_pair(state.market.zoom, snapshot.market.zoom),
-            unit_pair(state.market.activity, snapshot.market.activity),
-            state.harmonic_swell.get() * 100.0
+            "Voices{} {} | Stutters{} {} | Coins{} {} | Lasers{} {}",
+            state.demonic_voices.active,
+            clock_short(state.demonic_voices.clock),
+            state.demonic_stutters.active,
+            clock_short(state.demonic_stutters.clock),
+            state.flying_coins.active,
+            clock_short(state.flying_coins.clock),
+            state.laser_beams.active,
+            clock_short(state.laser_beams.clock),
         )),
         Line::raw(format!(
             "LP {:.0}>{:.0}Hz | HP {:.0}>{:.0}Hz | focus {:.0}>{:.0}% | room {:.2}>{:.2} | W {:.0}>{:.0}%",
@@ -1544,10 +1586,6 @@ fn parameter(
     format: impl Fn(f32) -> String,
 ) -> Line<'static> {
     comparison(label, format(value.current), format(value.target))
-}
-
-fn percent(value: f32) -> String {
-    format!("{:3.0}%", value * 100.0)
 }
 
 fn hz(value: f32) -> String {
@@ -2149,6 +2187,21 @@ mod tests {
                         "missing {expected:?} for {tab:?} at {width}x{height}:\n{text}"
                     );
                 }
+                for expected in if width >= 140 {
+                    [
+                        "Demonic voices 0",
+                        "Stutters 0",
+                        "Flying coins 0",
+                        "Lasers 0",
+                    ]
+                } else {
+                    ["Voices0", "Stutters0", "Coins0", "Lasers0"]
+                } {
+                    assert!(
+                        text.contains(expected),
+                        "missing ambient activity {expected:?}"
+                    );
+                }
                 if tab == Tab::Mixer {
                     assert!(
                         text.contains("Output gain")
@@ -2162,6 +2215,7 @@ mod tests {
                         "UI / EVENTS",
                         "TRANSMISSION",
                         "MELODY",
+                        "ACCENTS",
                         "Room",
                         "Damp",
                         "Width",

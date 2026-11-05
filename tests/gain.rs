@@ -41,6 +41,10 @@ fn renderer(mix: Mix) -> Renderer {
 fn default_ui_levels_are_audible_without_maximizing_the_mixer() {
     let mix = Mix {
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ZERO,
@@ -123,6 +127,10 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "texture",
             Mix {
                 drone: Unit::ZERO,
+                demonic_voices: Unit::ZERO,
+                demonic_stutters: Unit::ZERO,
+                flying_coins: Unit::ZERO,
+                laser_beams: Unit::ZERO,
                 sub: Unit::ZERO,
                 transmission: Unit::ZERO,
                 harmony: Unit::ZERO,
@@ -137,6 +145,10 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "harmony",
             Mix {
                 drone: Unit::ZERO,
+                demonic_voices: Unit::ZERO,
+                demonic_stutters: Unit::ZERO,
+                flying_coins: Unit::ZERO,
+                laser_beams: Unit::ZERO,
                 sub: Unit::ZERO,
                 transmission: Unit::ZERO,
                 texture: Unit::ZERO,
@@ -151,6 +163,10 @@ fn default_non_drone_layers_keep_an_audible_presence() {
             "melody",
             Mix {
                 drone: Unit::ZERO,
+                demonic_voices: Unit::ZERO,
+                demonic_stutters: Unit::ZERO,
+                flying_coins: Unit::ZERO,
+                laser_beams: Unit::ZERO,
                 sub: Unit::ZERO,
                 transmission: Unit::ZERO,
                 texture: Unit::ZERO,
@@ -189,6 +205,10 @@ fn ordinary_event_levels_follow_the_master_without_continuous_saturation() {
     let mix = Mix {
         master: Unit::new(0.2).unwrap(),
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ZERO,
@@ -224,6 +244,10 @@ fn ordinary_event_levels_follow_the_master_without_continuous_saturation() {
 fn every_default_effect_stays_inside_the_output_ceiling_after_boost() {
     let mix = Mix {
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ZERO,
@@ -284,6 +308,10 @@ fn output_gain_is_an_independent_linear_boost_below_the_output_knee() {
         master: Unit::new(0.15).unwrap(),
         output_gain: neutral_gain,
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ZERO,

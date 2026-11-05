@@ -5,8 +5,8 @@ These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- All-target release tests: 141 passed, with two known sub-tuning tests excluded.
-- Headless release tests: 103 passed, with the same two sub-tuning tests excluded.
+- Targeted release checks: 11 passed (tone synthesis, ambience, allocation audit).
+- Headless compilation (`--no-default-features`) passed.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
 - The scoped allocator audit includes first rendering, all effect families,
@@ -420,3 +420,127 @@ The 30-second interactive benchmark rendered in 0.958497 seconds (3.195% of
 realtime wall time) at 48 kHz, 256-frame blocks, and 32 available voices. A
 separate preceding-build run measured 0.949178 seconds (3.164%). These offline
 measurements exclude device scheduling and native callback utilization.
+
+
+## Autonomous voices and high-register formations
+
+The background has four separately mixed sources: Demonic voices, Demonic
+stutters, Flying coins, and Laser beams. Voices share a two-slot pool across
+both delivery styles and take opposing Haas positions during overlap. English
+letter-name gestures advance through the live ticker, skipping punctuation;
+pink/sine excitation shapes letter articulations. Each utterance lasts
+0.4..7 seconds. Male/female formant centers use measured English-whisper
+profiles from the research notes. Their bandwidths are design values of
+200/150/175 Hz for F1/F2/F3, with nominal noise-envelope peak targets of
+6/0/-3 dB. The F1 emphasis compensates background masking. These are
+engineering settings, not universal whisper norms. Branch gains compensate
+pink-noise tilt and the 6.2 kHz low-pass response. Frequencies, bandwidths, and peak targets morph
+together; intentional +/-33% frequency excursions scale bandwidths with
+frequency to preserve Q. Morphs occupy the final 30 ms of each phone,
+capped at 55% of very short phones; branch gains smooth over 5 ms. Both
+delivery styles use the library pinking filter, soft-clip its output,
+add a seeded 30..110 Hz sine at 0.25 amplitude, apply +6 dB, and soft-clip
+again before the formant and frication filters. Peak-normalized resonators
+keep this distorted excitation controlled at 192 kHz. Actual-signal tests
+verify the periodic source contributes nonlinear harmonics without exceeding
+the excitation ceiling.
+
+Stutter rate and amplitude targets change over 0.3..1.5 seconds, staying within
+3..20 Hz with rounded pulse edges. Coins contain 2..10 partials at 1..10 kHz,
+a bounded PM matrix, independent amplitude/index LFOs at 0.3..4 Hz, and separate
+3..7 second attack/release times. One or two partials oppose the main stereo
+group. Their stereo sum receives two Q 0.8 bell cuts: -12 dB at 3.3 kHz and
+-9 dB at 9 kHz, before the dry/reverb split. Coin and laser mix gains default
+to 0.125 and 0.10. Lasers use 10..14 kHz carriers, much weaker PM, clustered
+positions,
+40..200 Hz onset shaking that decays in 100 ms, small level motion, and
+independent 50% duty amplitude pulses at seeded 3..10 Hz rates. Each partial
+begins in its on half-cycle and holds its selected rate for the formation,
+with 2 ms gain smoothing at each switch. Their source duration is 6..14 seconds.
+Unsupported high registers stay silent rather than moving into a lower band.
+
+The first normal voice, stutter, coin formation, and laser formation are
+scheduled at 3, 6, 4, and 12 seconds. Subsequent voice opportunities are
+2..11 seconds apart; formation opportunities are 16..34 seconds apart.
+Dialog focus defers entrances. Arrangement and modulation follow the sample
+clock and reproduce independently of render block sizes or source gains.
+
+All four sources feed the separately controlled Accents reverb. Its defaults
+are 85% send, 88% room, 8% damping, 92% width, and 32% wet. Both dry accents and
+their return bypass the scene's low-pass; source filters retain band limits.
+The existing low-passed bed and its darker space keep their settings. Actual
+waveform tests compare send-zero and wet-zero renders against an audible
+tail, alongside isolated gain, ticker articulation, stereo, onset/dropout,
+frequency-band, EQ-response, transition-timing, and deterministic rendering
+checks. Eighteen new DSP and integration tests pass. The allocator audit includes active new sources,
+mutations, formation starts/retirement, and reverb at 8, 48, and 192 kHz,
+with zero allocations or deallocations after construction.
+
+The current tone, ambient, and allocation checks pass all 11 targeted tests. Four unrelated baseline failures remain:
+two sub tuning assertions expect less than 0.8% detuning despite the existing
++/-0.24-semitone spread, and two harmony assertions expect a three-second
+crossfade despite the existing half-second increment. The sub failures were
+also reproduced from an untouched HEAD archive; the unchanged timing code and
+assertions establish the other two baseline mismatches. Formatting, all-target
+Clippy with warnings denied and the headless build pass. CLI/TUI test
+coverage includes the four new gains, activity monitoring, and five reverb
+buses at 80x24 and larger sizes.
+
+The F1-compensation reference export runs 40 seconds at 48 kHz with seed 123,
+changing AAPL to QWIX at 14 seconds and
+TSLA at 27 seconds. UI and transmissions are muted. Isolated exports retain
+default layer gains, master/output trim, and reverb:
+
+| Signal | Peak dBFS | RMS dBFS including gaps | RMS dBFS in active trace bins |
+| --- | ---: | ---: | ---: |
+| Environment | -9.85 | -23.37 | -23.37 |
+| Demonic voices | -30.05 | -49.23 | -47.07 |
+| Demonic stutters | -44.05 | -70.07 | -65.29 |
+| Flying coins | -43.75 | -66.11 | -63.31 |
+| Laser beams | -43.68 | -63.10 | -59.24 |
+
+Active windows use half-second source-activity traces, so their boundaries are
+approximate. Coins retain 99.882% of measured spectral energy at 1..10 kHz;
+lasers retain 99.939% at 10..14 kHz. Voice mono fold-down retains about 52%
+of mean channel energy, coins 91%, and lasers 92%. The largest sample step in
+the environment is 0.01425. High-band reverb tails decay quickly: the laser's
+19.1..19.6 second window measures -103.37 dBFS; the voice's 19.1..19.6 second
+window measures -68.10 dBFS. These are signal measurements, not a listening
+verdict. WAVs, JSONL traces, measurements, and repeatable export/analysis
+scripts are in `/private/tmp/shzx-sfx-voice-f1-boost/`.
+
+Seventy-two actual sustained-vowel cases cover male/female I/A/U/O profiles,
+30/70/110 Hz excitation sines, and three noise seeds. Averaged 32768-point
+Hann spectra exclude coherent harmonic main lobes and smooth the noise
+spectrum over 30 Hz. F2/F1 peak levels range from -6.92 to -2.63 dB, and
+F3/F1 from -10.63 to -7.01 dB. Actual impulse-response checks at 8, 48, and
+192 kHz measure peak error below 0.003 dB and half-power bandwidth error
+below 0.41%. A separate actual-wave and coefficient regression checks the
+late, fast vowel morph at 400 ms and seven-second utterance lengths across
+these three rates, including its midpoint and endpoint.
+The default voice export places 7.07% of energy below 300 Hz and 58.31% at
+300..1000 Hz; stutters place 8.29% and 60.20% in these bands. These comparisons
+describe spectral balance, not listener transcription accuracy.
+
+Laser amplitudes use a seeded fixed 3..10 Hz rate per partial, 50% duty, and
+2 ms edge smoothing. Endpoint tests at 8, 48, and 192 kHz measure maximum
+period error of 0.025% and duty error of 0.0187%; independent partial pulse
+patterns diverge within the tested one-second window. Rates describe full
+on/off cycles. All six tone tests, four ambient integration tests, and the
+allocation audit pass. Random choices occur at source construction, and the
+pulse phase clock uses f64 to retain sample-level timing at high rates.
+
+A fresh 30-second isolated laser export at 48 kHz, seed 123, default gain,
+and default reverb measures -48.56 dBFS peak, -62.96 dBFS full-file RMS, and
+-59.00 dBFS approximate active-window RMS. All samples are finite, the largest
+sample step is 0.00534, and 99.9997% of spectral energy is at 10..14 kHz.
+In the 13..17 second window, 85.10% of measured 0.5..40 Hz amplitude-envelope
+modulation power falls at 3..10 Hz. The full WAV/JSONL and a 15-second excerpt
+starting at second 12 are in `/private/tmp/shzx-sfx-laser-pulses/`, alongside
+measurements and build provenance.
+
+The 30-second interactive benchmark at 48 kHz, 256-frame blocks, seed 123,
+and 32 available UI voices renders in 2.211 seconds (7.369% of realtime wall
+time), with six UI voices observed at block boundaries, no stealing, and no
+suppressed requests. This measures offline throughput; native device playback
+and callback scheduling were not measured for this revision.

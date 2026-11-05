@@ -216,6 +216,10 @@ fn bursts_and_live_parameter_changes_stay_finite_and_bounded() {
     renderer.apply(Command::Mix(Mix {
         master: Unit::ONE,
         drone: Unit::ONE,
+        demonic_voices: Unit::ONE,
+        demonic_stutters: Unit::ONE,
+        flying_coins: Unit::ONE,
+        laser_beams: Unit::ONE,
         sub: Unit::ONE,
         transmission: Unit::ONE,
         texture: Unit::ONE,
@@ -301,6 +305,10 @@ fn deep_zoom_darkens_the_noise_texture_after_smoothing() {
     let mix = Mix {
         master: Unit::ONE,
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ONE,
@@ -353,6 +361,10 @@ fn dialog_focus_changes_the_environment_but_keeps_ui_effects_audible() {
     let mix = Mix {
         master: Unit::ONE,
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         transmission: Unit::ZERO,
         texture: Unit::ZERO,

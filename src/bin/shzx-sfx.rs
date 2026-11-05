@@ -123,6 +123,10 @@ enum MixLayer {
     Texture,
     Harmony,
     Melody,
+    DemonicVoices,
+    DemonicStutters,
+    FlyingCoins,
+    LaserBeams,
     Ui,
     Transmission,
     Reverb,
@@ -135,16 +139,18 @@ enum ReverbBus {
     Events,
     Transmission,
     Melody,
+    Accents,
 }
 
 #[cfg(feature = "playback")]
 impl ReverbBus {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Environment,
         Self::Events,
         Self::Transmission,
         Self::Melody,
+        Self::Accents,
     ];
     #[cfg(feature = "tui")]
     fn label(self) -> &'static str {
@@ -153,6 +159,7 @@ impl ReverbBus {
             Self::Events => "UI / events",
             Self::Transmission => "Transmission",
             Self::Melody => "Melody",
+            Self::Accents => "Accents",
         }
     }
     fn get(self, settings: ReverbSettings) -> ReverbParameters {
@@ -161,6 +168,7 @@ impl ReverbBus {
             Self::Events => settings.events,
             Self::Transmission => settings.transmission,
             Self::Melody => settings.melody,
+            Self::Accents => settings.accents,
         }
     }
     fn set(self, settings: &mut ReverbSettings, parameters: ReverbParameters) {
@@ -169,6 +177,7 @@ impl ReverbBus {
             Self::Events => &mut settings.events,
             Self::Transmission => &mut settings.transmission,
             Self::Melody => &mut settings.melody,
+            Self::Accents => &mut settings.accents,
         } = parameters;
     }
 }
@@ -197,12 +206,12 @@ impl ReverbField {
     fn label(self, width: u16) -> &'static str {
         match self {
             Self::Send => "Send",
-            Self::Room if width < 32 => "Room",
+            Self::Room if width < 14 => "Room",
             Self::Room => "Room / tail",
-            Self::Damping if width < 32 => "Damp",
+            Self::Damping if width < 14 => "Damp",
             Self::Damping => "Damping",
             Self::Width => "Width",
-            Self::Wet if width < 32 => "Wet",
+            Self::Wet if width < 14 => "Wet",
             Self::Wet => "Wet level",
         }
     }
@@ -229,13 +238,17 @@ impl ReverbField {
 
 impl MixLayer {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 13] = [
         Self::Master,
         Self::Drone,
         Self::Sub,
         Self::Texture,
         Self::Harmony,
         Self::Melody,
+        Self::DemonicVoices,
+        Self::DemonicStutters,
+        Self::FlyingCoins,
+        Self::LaserBeams,
         Self::Ui,
         Self::Transmission,
         Self::Reverb,
@@ -250,6 +263,10 @@ impl MixLayer {
             Self::Texture => mix.texture,
             Self::Harmony => mix.harmony,
             Self::Melody => mix.melody,
+            Self::DemonicVoices => mix.demonic_voices,
+            Self::DemonicStutters => mix.demonic_stutters,
+            Self::FlyingCoins => mix.flying_coins,
+            Self::LaserBeams => mix.laser_beams,
             Self::Ui => mix.ui,
             Self::Transmission => mix.transmission,
             Self::Reverb => mix.reverb,
@@ -264,6 +281,10 @@ impl MixLayer {
             Self::Texture => &mut mix.texture,
             Self::Harmony => &mut mix.harmony,
             Self::Melody => &mut mix.melody,
+            Self::DemonicVoices => &mut mix.demonic_voices,
+            Self::DemonicStutters => &mut mix.demonic_stutters,
+            Self::FlyingCoins => &mut mix.flying_coins,
+            Self::LaserBeams => &mut mix.laser_beams,
             Self::Ui => &mut mix.ui,
             Self::Transmission => &mut mix.transmission,
             Self::Reverb => &mut mix.reverb,
@@ -864,6 +885,10 @@ fn palette(args: PaletteArgs) -> CliResult<()> {
     config.mix.texture = Unit::ZERO;
     config.mix.harmony = Unit::ZERO;
     config.mix.melody = Unit::ZERO;
+    config.mix.demonic_voices = Unit::ZERO;
+    config.mix.demonic_stutters = Unit::ZERO;
+    config.mix.flying_coins = Unit::ZERO;
+    config.mix.laser_beams = Unit::ZERO;
     let mut entries = Vec::new();
     for kind in SfxKind::iter() {
         for variation in 0..args.variations {
@@ -1053,6 +1078,10 @@ fn run(cli: Cli) -> CliResult<()> {
                 config.mix.texture = Unit::ZERO;
                 config.mix.harmony = Unit::ZERO;
                 config.mix.melody = Unit::ZERO;
+                config.mix.demonic_voices = Unit::ZERO;
+                config.mix.demonic_stutters = Unit::ZERO;
+                config.mix.flying_coins = Unit::ZERO;
+                config.mix.laser_beams = Unit::ZERO;
                 vec![TimedCommand {
                     at_seconds: (args.seconds * 0.1).min(0.25),
                     command: Command::Trigger(SfxEvent {
@@ -1441,7 +1470,7 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
 #[cfg(feature = "playback")]
 fn repl_help() {
     println!(
-        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
+        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  mix demonic-voices|demonic-stutters|flying-coins|laser-beams LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody|accents send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
     );
 }
 

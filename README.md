@@ -18,9 +18,19 @@ cargo run --release -- play --script examples/demo.json --seconds 30
 
 Running without arguments shows help. In an interactive terminal, `play` opens a Ratatui/Crossterm control panel with calibrated default levels. The explicit `tui` command opens the same panel and requires a terminal on both stdin and stdout. Both accept `--device NAME` and `--buffer-frames N`; omit them to use the default device and its system buffer.
 
-The panel has seven tabs: Scene selects environment modes and market presets; Market changes trend, strength, volume, volatility, zoom, and interaction activity; Mixer adjusts each layer and output gain; SFX browses all 37 effects beside the recipe inspector and sets audition pan and intensity; Monitor expands the background state; Reverb controls the environment, UI, transmission, and melody processors separately; Inspect explains the selected event and auditions its components. The SFX page keeps the palette and audition controls on the left and its selected recipe inspector on the right, including at 80x24. Other control pages keep the background monitor: side by side at 140 columns or wider, stacked below on smaller terminals.
+The panel has seven tabs: Scene selects environment modes and market presets; Market changes trend, strength, volume, volatility, zoom, and interaction activity; Mixer adjusts each layer and output gain; SFX browses all 37 effects beside the recipe inspector and sets audition pan and intensity; Monitor expands the background state; Reverb controls the environment, UI, transmission, melody, and accents processors separately; Inspect explains the selected event and auditions its components. The SFX page keeps the palette and audition controls on the left and its selected recipe inspector on the right, including at 80x24. Other control pages keep the background monitor: side by side at 140 columns or wider, stacked below on smaller terminals.
 
 Monitor shows market input smoothing, focus, low/high-pass cutoffs, reverb room size, harmonic crossfade progress, the next chord preview and clock, harmonic swell, and detail/melody activity and schedules. Separate detail and melody ping-pong sends respond to view conditions; their current and target delay times, feedback, and sends are visible too. The chord preview can change with new market inputs. Held clocks identify entrances or harmonic changes deferred by a focused scene.
+
+Four additional autonomous layers have independent Mixer controls and activity clocks in Monitor: Demonic voices, Demonic stutters, Flying coins, and Laser beams. Their `Mix` gains default to 0.30, 0.18, 0.125, and 0.10 respectively. The matching CLI/REPL names are `demonic-voices`, `demonic-stutters`, `flying-coins`, and `laser-beams`; for example, `--mute-layer laser-beams` or `mix demonic-voices 0.2`.
+
+Demonic voices shape a pink-noise and sine source with moving vowel formants following the current ticker's spoken letter names. Pink noise is soft-clipped, mixed with a seeded 30-110 Hz sine at amplitude 0.25, boosted by 6 dB, and soft-clipped again before the formant filters. Up to two voices share separated Haas positions; stutters use a quieter, changing fast gate.
+
+Vowel centers follow measured male and female English-whisper profiles. Vowels and glides use nominal F1/F2/F3 noise-envelope targets of 6/0/-3 dB, with the first-formant emphasis chosen to help it remain audible against the background. Bandwidths and peak levels are design settings, calibrated for pink-noise tilt and the 6.2 kHz output low-pass. Formants move smoothly toward the next phone over the final 30 ms of the current phone at most; very short phones cap that transition at 55% of their duration. The periodic sine makes this a procedural demonic voice informed by whisper measurements; the [voice research](docs/sound-design-research.md#whispered-vowel-formants-and-amplitude-balance) explains the measurements and their limits.
+
+Flying coins combine slowly fading 1-10 kHz sine formations with phase modulation and scattered stereo positions. Their stereo sum passes through broad bell cuts at 3.3 kHz (-12 dB) and 9 kHz (-9 dB), both Q 0.8. Laser beams use clustered 10-14 kHz partials and brief onset pitch shaking. Each partial starts audible and repeats a 50% duty amplitude pulse at its own seeded, fixed 3-10 Hz rate, with 2 ms smoothing at each switch.
+
+Source band limits preserve their intended registers; the high accents bypass the scene's low-pass so their upper frequencies remain audible. All four layers feed the independent Accents reverb. Its default 8% damping preserves high-frequency tails, while the environment bed keeps its darker space. `ReverbSettings.accents` and `reverb accents` expose its send, room, damping, width, and wet controls.
 
 The mixer includes an output gain in decibels, defaulting to +12 dB with a -60 to +24 dB range. `--output-gain-db` sets its startup value. Master remains a separate 0..1 attenuation. The background balances noise, harmony, and melody against the sub-bass instead of relying on the drone for its measured level. The output remains linear below its stereo-linked overload knee.
 
@@ -36,7 +46,7 @@ UI effects pass through a broad bell cut centered at 3 kHz, -9 dB, Q 0.65, befor
 
 Sharp routine sounds use fast attacks with lower sustain and slightly longer decay/release, rather than a strict flat held body. Click uses roughly 0.25 ms attack, 8 ms decay, 5.5% sustain, and 4 ms release; SecondaryClick uses 0.3/10 ms, 4.5%, and 4.5 ms. Longer action signatures retain their envelopes.
 
-Reverb tab `6` offers Environment, UI/event, Transmission, and Melody selectors, each with independent Send, Room/tail, Damping, Width, and Wet controls. UI send defaults to 12%, versus 85% for the environment, keeping events close with quieter tails. Transmission defaults to 67% send, 83% damping, and 25% wet. Melody defaults to 95% send, 88% room, 68% damping, 92% width, and 85% wet; its settings are available through `ReverbSettings.melody` and REPL commands beginning with `reverb melody`. Send controls new input to the processor; turning it down preserves the tail already in flight. Wet controls the returning tail. Dialog and Focus smoothly narrow the environment, UI, and melody reverberant stereo fields. Room controls tail character rather than a guaranteed number of decay seconds.
+Reverb tab `6` offers Environment, UI/event, Transmission, Melody, and Accents columns, each with independent Send, Room/tail, Damping, Width, and Wet controls. UI send defaults to 12%, versus 85% for the environment, keeping events close with quieter tails. Transmission defaults to 67% send, 83% damping, and 25% wet. Melody defaults to 95% send, 88% room, 68% damping, 92% width, and 85% wet; its settings are available through `ReverbSettings.melody` and REPL commands beginning with `reverb melody`. Accents default to 85% send, 88% room, 8% damping, 92% width, and 32% wet. Send controls new input to the processor; turning it down preserves the tail already in flight. Wet controls the returning tail. Dialog and Focus smoothly narrow the environment, UI, melody, and accents reverberant stereo fields. Room controls tail character rather than a guaranteed number of decay seconds.
 
 Use `1` through `7` to switch tabs, `Tab`/`Shift-Tab` to focus controls, and arrows to navigate or change values. Hold `Shift` with an arrow for finer adjustment; `Home`/`End` set slider bounds. `Enter` activates a button. In SFX, Up/Down browse sounds, Page Up/Down move eight sounds, and `Space` auditions the selection. You can also click buttons, click or drag sliders, and use the wheel to browse effects. Clicking a sound name immediately auditions it; repeated clicks create fresh variations. Keyboard and wheel browsing remain silent.
 
@@ -85,6 +95,10 @@ mix harmony 0.4
 mix texture 0.3
 mix sub 0.35
 mix transmission 0.22
+mix demonic-voices 0.3
+mix demonic-stutters 0.18
+mix flying-coins 0.125
+mix laser-beams 0.1
 transmission start -0.4
 transmission pan 0.3
 transmission end
@@ -94,6 +108,7 @@ reverb events room 0.9
 reverb transmission wet 0.25
 reverb melody send 0.95
 reverb melody wet 0.85
+reverb accents damping 0.08
 symbol MSFT
 mix master 0
 spatial pan

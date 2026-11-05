@@ -170,6 +170,10 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             Command::Mix(Mix {
                 master: Unit::ONE,
                 output_gain: OutputGain::new(24.0).unwrap(),
+                demonic_voices: Unit::ONE,
+                demonic_stutters: Unit::ONE,
+                flying_coins: Unit::ONE,
+                laser_beams: Unit::ONE,
                 ..Mix::default()
             }),
             Command::Reverb(ReverbSettings::default()),
@@ -235,5 +239,11 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
         assert!(snapshot.stolen_voices > 0);
         assert!(snapshot.coalesced_events > 0);
         assert_eq!(snapshot.active_voices, 0);
+        assert!(snapshot.background.demonic_voices.generated > 0);
+        assert!(snapshot.background.demonic_stutters.generated > 0);
+        if sample_rate >= 48_000 {
+            assert!(snapshot.background.flying_coins.generated > 0);
+            assert!(snapshot.background.laser_beams.generated > 0);
+        }
     }
 }

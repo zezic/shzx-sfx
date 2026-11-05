@@ -68,18 +68,19 @@ pub struct Renderer {
     mode: Mode,
     focus: Smooth,
     mix: Mix,
-    mix_smoothers: [Smooth; 8],
+    mix_smoothers: [Smooth; 12],
     current_mix: Mix,
     master: Smooth,
     output_gain: Smooth,
     reverb: ReverbSettings,
-    reverb_smoothers: [ReverbSmoothers; 4],
+    reverb_smoothers: [ReverbSmoothers; 5],
     current_reverb: ReverbSettings,
     spatial: SpatialMode,
     environment_reverb: SpaceReverb,
     ui_reverb: SpaceReverb,
     transmission_reverb: SpaceReverb,
     melody_reverb: SpaceReverb,
+    accent_reverb: SpaceReverb,
     lowpass: [LowPass; 2],
     highpass: [HighPass; 2],
     wet_lowpass: [LowPass; 2],
@@ -101,6 +102,7 @@ impl Renderer {
         let ui_reverb = new_reverb(config.sample_rate, config.reverb.events);
         let transmission_reverb = new_reverb(config.sample_rate, config.reverb.transmission);
         let melody_reverb = new_reverb(config.sample_rate, config.reverb.melody);
+        let accent_reverb = new_reverb(config.sample_rate, config.reverb.accents);
         let mut master = Smooth::new(0.0, 0.025, rate);
         master.target(config.mix.master.get());
         let harmony = Harmony::new(config.sample_rate, config.symbol.root());
@@ -140,6 +142,7 @@ impl Renderer {
             ui_reverb,
             transmission_reverb,
             melody_reverb,
+            accent_reverb,
             lowpass: std::array::from_fn(|_| LowPass::new(rate, 1400.0)),
             highpass: std::array::from_fn(|_| HighPass::new(rate, 32.0)),
             wet_lowpass: std::array::from_fn(|_| LowPass::new(rate, 1800.0)),
@@ -217,14 +220,16 @@ impl Renderer {
         {
             self.background.chord(self.harmony.chord);
         }
-        self.background.control(self.sample, market, focus);
-        let [environment, events, transmission, melody] =
+        self.background
+            .control(self.sample, market, focus, self.symbol);
+        let [environment, events, transmission, melody, accents] =
             self.reverb_smoothers.each_mut().map(|bus| bus.tick());
         self.current_reverb = ReverbSettings {
             environment,
             events,
             transmission,
             melody,
+            accents,
         };
         let parameters = environment_parameters(
             market.zoom.get(),
@@ -262,7 +267,10 @@ impl Renderer {
         let mut melody = self.current_reverb.melody;
         melody.width = Unit::clamped(melody.width.get() * width_scale);
         configure_reverb(&mut self.melody_reverb, melody.room_size.get(), melody);
-        let levels: [f32; 8] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
+        let mut accents = self.current_reverb.accents;
+        accents.width = Unit::clamped(accents.width.get() * width_scale);
+        configure_reverb(&mut self.accent_reverb, accents.room_size.get(), accents);
+        let levels: [f32; 12] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
         self.current_mix = Mix {
             master: self.mix.master,
             output_gain: self.mix.output_gain,
@@ -274,6 +282,10 @@ impl Renderer {
             reverb: Unit::clamped(levels[5]),
             sub: Unit::clamped(levels[6]),
             transmission: Unit::clamped(levels[7]),
+            demonic_voices: Unit::clamped(levels[8]),
+            demonic_stutters: Unit::clamped(levels[9]),
+            flying_coins: Unit::clamped(levels[10]),
+            laser_beams: Unit::clamped(levels[11]),
         };
     }
 
@@ -293,6 +305,7 @@ impl Renderer {
         let pitch_ratio = self.startup_pitch();
         let background = self.background.tick(self.current_mix, pitch_ratio);
         let melody = background.melody;
+        let accents = background.accents;
         let background = background.environment;
         let raw_ui = self.sfx.tick_scaled(pitch_ratio);
         let transmission = self.transmission.tick(pitch_ratio);
@@ -304,6 +317,10 @@ impl Renderer {
         let bg_wet = self
             .environment_reverb
             .tick((background[0] * bg_send, background[1] * bg_send));
+        let accent_send = self.current_reverb.accents.send.get();
+        let accent_wet = self
+            .accent_reverb
+            .tick((accents[0] * accent_send, accents[1] * accent_send));
         let ui_wet = self.ui_reverb.tick((ui[0] * ui_send, ui[1] * ui_send));
         let transmission_send = self.current_reverb.transmission.send.get();
         let transmission_wet = self.transmission_reverb.tick((
@@ -320,12 +337,17 @@ impl Renderer {
         let ui_wet = [ui_wet.0, ui_wet.1];
         let transmission_wet = [transmission_wet.0, transmission_wet.1];
         let melody_wet = [melody_wet.0, melody_wet.1];
+        let accent_wet = [accent_wet.0, accent_wet.1];
         let frame = std::array::from_fn(|i| {
             let distant = background[i] * (0.9 - focus * 0.65 - self.zoom_amount * 0.2)
                 + bg_wet[i] * wet * (0.5 + focus * 2.0 + self.zoom_amount * 0.35)
                 + melody[i] * MELODY_DRY_GAIN
                 + melody_wet[i] * wet;
-            let bg = self.lowpass[i].tick(self.highpass[i].tick(distant));
+            // High-register accents have source band-limiting and a brighter
+            // space. The scene's low-pass continues to darken the bed.
+            let bg = self.lowpass[i].tick(self.highpass[i].tick(distant))
+                + accents[i] * (0.9 - focus * 0.65 - self.zoom_amount * 0.2)
+                + accent_wet[i] * wet;
             let effect =
                 (ui[i] + self.wet_lowpass[i].tick(ui_wet[i]) * wet) * self.current_mix.ui.get();
             let data = (transmission[i] * 0.08 + transmission_wet[i] * wet)
@@ -401,6 +423,8 @@ impl Renderer {
         let market = self.background.market();
         let [detail_delay, melody_delay] =
             self.background.delay_snapshots(self.market, target_focus);
+        let [demonic_voices, demonic_stutters, flying_coins, laser_beams] =
+            self.background.accents(self.sample);
         BackgroundSnapshot {
             market,
             focus: ParameterSnapshot {
@@ -440,6 +464,10 @@ impl Renderer {
             melody: self.background.melody(self.sample),
             detail_delay,
             melody_delay,
+            demonic_voices,
+            demonic_stutters,
+            flying_coins,
+            laser_beams,
         }
     }
 }
@@ -472,12 +500,13 @@ fn new_reverb(sample_rate: u32, parameters: ReverbParameters) -> SpaceReverb {
     reverb
 }
 
-fn reverb_buses(settings: ReverbSettings) -> [ReverbParameters; 4] {
+fn reverb_buses(settings: ReverbSettings) -> [ReverbParameters; 5] {
     [
         settings.environment,
         settings.events,
         settings.transmission,
         settings.melody,
+        settings.accents,
     ]
 }
 
@@ -535,7 +564,7 @@ fn market_values(market: MarketContext) -> [f32; 5] {
     ]
 }
 
-fn mix_values(mix: Mix) -> [f32; 8] {
+fn mix_values(mix: Mix) -> [f32; 12] {
     [
         mix.drone.get(),
         mix.texture.get(),
@@ -545,6 +574,10 @@ fn mix_values(mix: Mix) -> [f32; 8] {
         mix.reverb.get(),
         mix.sub.get(),
         mix.transmission.get(),
+        mix.demonic_voices.get(),
+        mix.demonic_stutters.get(),
+        mix.flying_coins.get(),
+        mix.laser_beams.get(),
     ]
 }
 

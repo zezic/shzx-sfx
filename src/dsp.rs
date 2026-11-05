@@ -188,6 +188,12 @@ impl LowPass {
             self.q,
         ));
     }
+    pub fn magnitude_at(&self, hz: f32) -> f32 {
+        self.node
+            .coefs()
+            .response(f64::from(hz / self.sample_rate))
+            .norm() as f32
+    }
     #[inline]
     pub fn tick(&mut self, input: f32) -> f32 {
         self.node.tick(&[input].into())[0]
@@ -299,6 +305,18 @@ impl Osc {
     #[inline]
     pub fn tick_scaled(&mut self, table: &SineTable, pitch_ratio: f32) -> f32 {
         let value = table.at(self.phase);
+        self.advance(self.step * pitch_ratio);
+        value
+    }
+
+    #[inline]
+    pub fn tick_modulated(
+        &mut self,
+        table: &SineTable,
+        phase_cycles: f32,
+        pitch_ratio: f32,
+    ) -> f32 {
+        let value = table.at((self.phase + phase_cycles).rem_euclid(1.0));
         self.advance(self.step * pitch_ratio);
         value
     }

@@ -196,6 +196,10 @@ fn mode_width_does_not_change_the_dry_event_pan() {
     let mix = Mix {
         master: Unit::new(0.1).unwrap(),
         drone: Unit::ZERO,
+        demonic_voices: Unit::ZERO,
+        demonic_stutters: Unit::ZERO,
+        flying_coins: Unit::ZERO,
+        laser_beams: Unit::ZERO,
         sub: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,

@@ -1,11 +1,51 @@
 use fundsp::hacker32::{AudioNode, AudioUnit, Biquad, BiquadCoefs, chorus};
 
 use crate::{
-    BackgroundVoice, Chord, ChordTransition, ClockState, DelaySnapshot, DetailSnapshot,
-    MarketContext, MelodySnapshot, Mix, RootTransition, Unit,
+    AmbientSnapshot, BackgroundVoice, Chord, ChordTransition, ClockState, DelaySnapshot,
+    DetailSnapshot, MarketContext, MelodySnapshot, Mix, RootTransition, Symbol, Unit,
     dsp::{Echo, EchoParameters, LowPass, Osc, SineTable},
     harmony::midi_hz,
 };
+
+mod tones;
+mod voices;
+
+use tones::{ToneFormation, ToneKind};
+use voices::DemonicVoices;
+
+struct ScheduledTone {
+    sound: ToneFormation,
+    next: u64,
+    generated: u64,
+}
+
+impl ScheduledTone {
+    fn new(rate: u32, kind: ToneKind, first_seconds: u64) -> Self {
+        Self {
+            sound: ToneFormation::new(rate, kind),
+            next: u64::from(rate) * first_seconds,
+            generated: 0,
+        }
+    }
+
+    fn control(&mut self, sample: u64, rate: f32, focus: f32, rng: &mut fastrand::Rng) {
+        if sample >= self.next {
+            self.next = sample + ((16.0 + rng.f32() * 18.0) * rate) as u64;
+            if focus <= 0.7 && !self.sound.is_active() {
+                self.sound.start(rng);
+                self.generated += u64::from(self.sound.is_active());
+            }
+        }
+    }
+
+    fn snapshot(&self, sample: u64, rate: f32, focus: f32) -> AmbientSnapshot {
+        AmbientSnapshot {
+            generated: self.generated,
+            active: usize::from(self.sound.is_active()),
+            clock: ClockState::at(self.next, sample, rate, focus > 0.7),
+        }
+    }
+}
 
 const UNISON: usize = 12;
 const SUB_UNISON: usize = 16;
@@ -199,6 +239,7 @@ impl PadBank {
 pub(crate) struct BackgroundFrame {
     pub environment: [f32; 2],
     pub melody: [f32; 2],
+    pub accents: [f32; 2],
 }
 
 pub(crate) struct Background {
@@ -237,6 +278,10 @@ pub(crate) struct Background {
     market: MarketContext,
     focus: f32,
     harmonic_swell: f32,
+    voices: DemonicVoices,
+    coins: ScheduledTone,
+    lasers: ScheduledTone,
+    accent_rng: fastrand::Rng,
 }
 
 impl Background {
@@ -295,6 +340,10 @@ impl Background {
             market: MarketContext::default(),
             focus: 0.0,
             harmonic_swell: 0.0,
+            voices: DemonicVoices::new(rate, seed ^ 0x564f_4943_4553),
+            coins: ScheduledTone::new(rate, ToneKind::FlyingCoins, 4),
+            lasers: ScheduledTone::new(rate, ToneKind::LaserBeams, 12),
+            accent_rng: fastrand::Rng::with_seed(seed ^ 0x4143_4345_4e54),
             rng,
         }
     }
@@ -326,9 +375,14 @@ impl Background {
     }
 
     /// Run at a fixed 64-frame control rate, independent of device block size.
-    pub fn control(&mut self, sample: u64, market: MarketContext, focus: f32) {
+    pub fn control(&mut self, sample: u64, market: MarketContext, focus: f32, symbol: Symbol) {
         self.market = market;
         self.focus = focus;
+        self.voices.control(sample, symbol, focus);
+        self.coins
+            .control(sample, self.rate, focus, &mut self.accent_rng);
+        self.lasers
+            .control(sample, self.rate, focus, &mut self.accent_rng);
         self.drift_ratios = std::array::from_fn(|i| {
             let semitones = self.drift[i].semitones(sample, self.rate, &mut self.drift_rng);
             2.0_f32.powf(semitones / 12.0)
@@ -376,6 +430,16 @@ impl Background {
 
     pub fn harmonic_swell(&self) -> Unit {
         Unit::clamped(self.harmonic_swell)
+    }
+
+    pub fn accents(&self, sample: u64) -> [AmbientSnapshot; 4] {
+        let [voices, stutters] = self.voices.snapshots(sample, self.focus);
+        [
+            voices,
+            stutters,
+            self.coins.snapshot(sample, self.rate, self.focus),
+            self.lasers.snapshot(sample, self.rate, self.focus),
+        ]
     }
 
     pub fn delay_snapshots(&self, market: MarketContext, focus: f32) -> [DelaySnapshot; 2] {
@@ -552,6 +616,12 @@ impl Background {
             self.melody_filter[1].tick(melodic * self.melody_pan),
         ];
         let melody_wet = self.melody_echo.tick(melody);
+        let voices = self.voices.tick(
+            &self.table,
+            [mix.demonic_voices.get(), mix.demonic_stutters.get()],
+        );
+        let coins = self.coins.sound.tick(&self.table);
+        let lasers = self.lasers.sound.tick(&self.table);
         BackgroundFrame {
             environment: std::array::from_fn(|i| {
                 drone[i] * mix.drone.get()
@@ -560,6 +630,9 @@ impl Background {
                     + harmony[i] * mix.harmony.get()
             }),
             melody: std::array::from_fn(|i| (melody[i] + melody_wet[i]) * mix.melody.get()),
+            accents: std::array::from_fn(|i| {
+                voices[i] + coins[i] * mix.flying_coins.get() + lasers[i] * mix.laser_beams.get()
+            }),
         }
     }
 }
@@ -650,7 +723,12 @@ mod tests {
             for background in [&mut first, &mut second] {
                 background.next_melody = sample;
                 background.melody_age = None;
-                background.control(sample, MarketContext::default(), 0.0);
+                background.control(
+                    sample,
+                    MarketContext::default(),
+                    0.0,
+                    crate::Symbol::default(),
+                );
                 assert_eq!(background.melody_generated, index + 1);
                 assert_eq!(background.melody_age, Some(0));
                 assert!(background.next_melody >= sample + u64::from(rate) * 11);
@@ -668,7 +746,12 @@ mod tests {
         for background in [&mut first, &mut second] {
             background.next_melody = sample;
             background.melody_age = None;
-            background.control(sample, MarketContext::default(), 0.3);
+            background.control(
+                sample,
+                MarketContext::default(),
+                0.3,
+                crate::Symbol::default(),
+            );
             assert_eq!(background.melody_generated, 128);
             assert_eq!(background.melody_age, None);
             assert!(background.next_melody > sample);
