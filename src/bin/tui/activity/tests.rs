@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use shzx_sfx::SfxEvent;
 use strum::IntoEnumIterator;
@@ -28,12 +28,21 @@ fn action_trace(seed: u64, count: usize) -> Vec<(Duration, Action, Workflow)> {
 fn trace(seed: u64, count: usize) -> Vec<(Duration, SfxEvent, Workflow)> {
     action_trace(seed, count)
         .into_iter()
-        .filter_map(|(at, action, workflow)| match action {
-            Action::Trigger {
-                kind,
-                pan,
-                intensity,
-            } => Some((
+        .filter_map(|(at, action, workflow)| {
+            let (kind, pan, intensity) = match action {
+                Action::Trigger {
+                    kind,
+                    pan,
+                    intensity,
+                } => (kind, pan, intensity),
+                Action::Ui {
+                    event,
+                    pan,
+                    intensity,
+                } => (event.sound()?, pan, intensity),
+                _ => return None,
+            };
+            Some((
                 at,
                 SfxEvent {
                     pan,
@@ -41,8 +50,7 @@ fn trace(seed: u64, count: usize) -> Vec<(Duration, SfxEvent, Workflow)> {
                     ..SfxEvent::new(kind)
                 },
                 workflow,
-            )),
-            _ => None,
+            ))
         })
         .collect()
 }
@@ -122,7 +130,7 @@ fn seeded_workflows_cover_the_palette_with_frequent_hover_and_rare_coherent_orde
 
 #[test]
 fn virtual_targets_place_pointer_actions_and_drag_motion_across_the_stereo_field() {
-    let events = trace(1234, 2_000);
+    let events = trace(1234, 5_000);
     let drag = events
         .iter()
         .filter(|(_, event, workflow)| {
@@ -181,7 +189,7 @@ fn virtual_targets_place_pointer_actions_and_drag_motion_across_the_stereo_field
         if event.kind == SfxKind::Scroll {
             assert!(
                 event.pan.get() < -0.55 || event.pan.get().abs() < 0.11,
-                "wheel activity stays in the watchlist, chart, or positions panel"
+                "wheel activity stays in the watchlist, chart, positions, or order book"
             );
         }
         if previous.kind == SfxKind::HoverLeave {
@@ -193,6 +201,73 @@ fn virtual_targets_place_pointer_actions_and_drag_motion_across_the_stereo_field
         }
     }
     assert!(anchored_actions > 50 && scrollbar_actions > 10);
+}
+
+#[test]
+fn seeded_activity_uses_every_thought_between_related_actions_without_repetition() {
+    let actions = action_trace(1234, 40_000);
+    let mut events = BTreeSet::new();
+    let mut thoughts = BTreeSet::new();
+    let mut preceding = None;
+    let mut pending = Vec::new();
+    let mut last_used = BTreeMap::new();
+    let mut recent = VecDeque::new();
+    let mut real_events = 0;
+    let mut consecutive = false;
+    for (at, action, _) in actions {
+        match action {
+            Action::Ui { event, .. } => {
+                events.insert(event);
+                if let Some((previous_at, previous)) = preceding {
+                    consecutive |= pending.len() > 1;
+                    for (thought_at, thought) in pending.drain(..) {
+                        let thought: &Thought = thought;
+                        assert!(
+                            thought.fits(previous, event, at - previous_at),
+                            "{}",
+                            thought.id
+                        );
+                        assert!(
+                            thought_at > previous_at && thought_at < at,
+                            "{}",
+                            thought.id
+                        );
+                    }
+                }
+                preceding = Some((at, event));
+                real_events += 1;
+            }
+            Action::Thought(thought) => {
+                assert!(preceding.is_some(), "thoughts need a preceding UI action");
+                assert!(!recent.contains(&thought.id.as_str()), "{}", thought.id);
+                if let Some(last) = last_used.insert(thought.id.as_str(), real_events) {
+                    assert!(
+                        real_events - last >= thought.cooldown_events(),
+                        "{}",
+                        thought.id
+                    );
+                }
+                recent.push_back(thought.id.as_str());
+                if recent.len() > thoughts::library().dedupe_window() {
+                    recent.pop_front();
+                }
+                thoughts.insert(thought.id.as_str());
+                pending.push((at, thought));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(events, UiEvent::iter().collect());
+    let expected = thoughts::library()
+        .thoughts
+        .iter()
+        .map(|thought| thought.id.as_str())
+        .collect();
+    assert_eq!(thoughts, expected);
+    assert!(
+        consecutive,
+        "some pauses should contain consecutive thoughts"
+    );
 }
 
 #[test]
@@ -298,7 +373,16 @@ fn workflow_state_actions_match_dialog_focus_and_chart_lifecycles() {
     let mut modes = Vec::new();
     let mut deep_zoom_at = None;
     let mut zoom_transitions = 0;
+    let mut dismissed_at = None;
     for (at, action, workflow) in actions {
+        if let Some(dismissed_at) = dismissed_at.take() {
+            assert_eq!(action, Action::Mode(Mode::Browse));
+            assert!(
+                at - dismissed_at <= Duration::from_millis(100),
+                "returning to the bunker took {:?} after popup dismissal",
+                at - dismissed_at
+            );
+        }
         match action {
             Action::Mode(next) => {
                 if next != mode {
@@ -325,6 +409,18 @@ fn workflow_state_actions_match_dialog_focus_and_chart_lifecycles() {
                 SfxKind::ZoomIn | SfxKind::ZoomOut => assert_eq!(mode, Mode::Focus),
                 _ => {}
             },
+            Action::Ui { event, .. } => match event {
+                UiEvent::PopupOpen | UiEvent::PopupRead | UiEvent::PopupDismiss => {
+                    assert_eq!(mode, Mode::Dialog);
+                    if event == UiEvent::PopupDismiss {
+                        dismissed_at = Some(at);
+                    }
+                }
+                UiEvent::ChartZoomIn | UiEvent::ChartZoomOut => {
+                    assert_eq!(mode, Mode::Focus);
+                }
+                _ => {}
+            },
             Action::Zoom(zoom) => {
                 assert_eq!(workflow, Workflow::Routine(Routine::Chart));
                 if zoom.get() >= 0.9 {
@@ -339,7 +435,7 @@ fn workflow_state_actions_match_dialog_focus_and_chart_lifecycles() {
                     assert!(deep_zoom_at.is_none());
                 }
             }
-            Action::Market(_) => {}
+            Action::Market(_) | Action::Thought(_) => {}
         }
     }
     assert_eq!(modes.len(), 3);

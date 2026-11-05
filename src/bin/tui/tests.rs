@@ -1202,7 +1202,10 @@ fn event_log_records_accepted_simulator_and_manual_commands_once_with_their_para
     let entry = app.event_log.entries().next().unwrap();
     assert_eq!(entry.at, retried_at);
     assert_eq!(entry.source, events::EventSource::Simulator);
-    assert_eq!(Some(entry.command), rejected);
+    assert_eq!(
+        entry.kind,
+        events::LoggedEventKind::Command(rejected.unwrap())
+    );
 
     app.event_pan = Pan::new(-0.8).unwrap();
     app.event_intensity = Unit::new(0.7).unwrap();
@@ -1214,8 +1217,10 @@ fn event_log_records_accepted_simulator_and_manual_commands_once_with_their_para
     assert_eq!(entry.at, retried_at);
     assert_eq!(entry.source, events::EventSource::User);
     assert_eq!(
-        entry.command,
-        Command::Trigger(app.event(SfxKind::Click, SfxLayerSelection::All))
+        entry.kind,
+        events::LoggedEventKind::Command(Command::Trigger(
+            app.event(SfxKind::Click, SfxLayerSelection::All)
+        ))
     );
 }
 
@@ -1246,7 +1251,7 @@ fn event_log_retains_a_bounded_recent_history_across_pause_and_reset() {
     );
     assert!(app.event_log.entries().any(|entry| {
         entry.at == Duration::from_secs(139)
-            && matches!(entry.command, Command::Trigger(event) if event.kind == SfxKind::Click)
+            && matches!(entry.kind, events::LoggedEventKind::Command(Command::Trigger(event)) if event.kind == SfxKind::Click)
     }));
 }
 
@@ -1260,6 +1265,7 @@ fn activity_commands_drive_accepted_scene_and_market_state_with_independent_zoom
     let mut zoomed_out = false;
     let mut requests = 0;
     let mut pending = None;
+    let mut thoughts = 0;
     for tick in 0..12_000 {
         let before = (app.mode, app.market);
         let mut requested = None;
@@ -1283,6 +1289,12 @@ fn activity_commands_drive_accepted_scene_and_market_state_with_independent_zoom
         });
         let Some(command) = requested else {
             assert_eq!((app.mode, app.market), before);
+            if app.event_log.entries().next_back().is_some_and(|entry| {
+                entry.at == Duration::from_millis(tick * 80)
+                    && matches!(entry.kind, events::LoggedEventKind::Thought(_))
+            }) {
+                thoughts += 1;
+            }
             continue;
         };
         if rejected {
@@ -1291,7 +1303,16 @@ fn activity_commands_drive_accepted_scene_and_market_state_with_independent_zoom
         }
         let logged = app.event_log.entries().next_back().unwrap();
         assert_eq!(logged.source, events::EventSource::Simulator);
-        assert_eq!(logged.command, command);
+        match logged.kind {
+            events::LoggedEventKind::Command(logged) => assert_eq!(logged, command),
+            events::LoggedEventKind::Activity(event) => {
+                let Command::Trigger(sound) = command else {
+                    panic!("semantic interactions only trigger sounds");
+                };
+                assert_eq!(event.sound(), Some(sound.kind));
+            }
+            events::LoggedEventKind::Thought(_) => panic!("thoughts must stay silent"),
+        }
         match command {
             Command::Mode(mode) => {
                 assert_eq!(app.mode, mode);
@@ -1331,4 +1352,8 @@ fn activity_commands_drive_accepted_scene_and_market_state_with_independent_zoom
     assert_eq!(modes.len(), 3);
     assert_eq!(markets.len(), 4);
     assert!(zoomed_in && zoomed_out);
+    assert!(
+        thoughts > 0,
+        "thoughts must be logged without sending audio commands"
+    );
 }

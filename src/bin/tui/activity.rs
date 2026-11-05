@@ -4,6 +4,9 @@ use shzx_sfx::{Mode, Pan, SfxKind, Unit};
 
 use super::Preset;
 
+pub(super) mod thoughts;
+use thoughts::{Thought, ThoughtDeck, UiEvent};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Action {
     Trigger {
@@ -14,6 +17,61 @@ pub(super) enum Action {
     Mode(Mode),
     Market(Preset),
     Zoom(Unit),
+    Ui {
+        event: UiEvent,
+        pan: Pan,
+        intensity: Unit,
+    },
+    Thought(&'static Thought),
+}
+
+impl UiEvent {
+    pub(super) fn sound(self) -> Option<SfxKind> {
+        use SfxKind::*;
+        use UiEvent::*;
+        Some(match self {
+            MarketOpen | MarketSwitch | UiIdle | SessionEnd => return None,
+            InstrumentSearch => Search,
+            SearchClear => Cancel,
+            OrderCanceled => OrderCancel,
+            ChartZoomIn => ZoomIn,
+            ChartZoomOut => ZoomOut,
+            ChartPan => DragOver,
+            ChartTimeframeChange => Resize,
+            BookScroll | UiScroll => Scroll,
+            WatchlistEdit => Drop,
+            OrderSubmit => Confirm,
+            OrderAccepted => OrderCreate,
+            OrderFilled => OrderFill,
+            OrderPartialFill => Notification,
+            OrderCancelRequest => DestructiveClick,
+            OrderRejected => Error,
+            PopupOpen => DialogOpen,
+            PopupRead => Focus,
+            PopupDismiss => DialogClose,
+            WarningOpen => Warning,
+            UiHover => HoverEnter,
+            ConnectionLag => Disconnect,
+            InstrumentSelect | BookOpen | OrderTicketOpen | OrderSideSelect | OrderQuantityEdit
+            | OrderPriceEdit | PositionOpen | PositionClose | BalanceView | PortfolioView
+            | HistoryOpen => Click,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Interaction {
+    Sound(SfxKind),
+    Ui(UiEvent),
+}
+
+impl Interaction {
+    fn sound(self) -> Option<SfxKind> {
+        match self {
+            Self::Sound(kind) => Some(kind),
+            Self::Ui(event) => event.sound(),
+        }
+    }
 }
 
 /// A virtual trading terminal, independent of the sound lab's controls.
@@ -92,10 +150,14 @@ enum Routine {
     Settings,
     Refresh,
     Connection,
+    Book,
+    Portfolio,
+    Session,
+    Warning,
 }
 
 impl Routine {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 16] = [
         Self::Browse,
         Self::Scroll,
         Self::Scrollbar,
@@ -108,13 +170,19 @@ impl Routine {
         Self::Settings,
         Self::Refresh,
         Self::Connection,
+        Self::Book,
+        Self::Portfolio,
+        Self::Session,
+        Self::Warning,
     ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OrderOutcome {
     Fill,
+    PartialFill,
     Cancel,
+    Reject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,99 +207,186 @@ impl Workflow {
                 Routine::Settings => "Changing view settings",
                 Routine::Refresh => "Refreshing market data",
                 Routine::Connection => "Reconnecting terminal",
+                Routine::Book => "Reading order book and editing a limit price",
+                Routine::Portfolio => "Checking portfolio, balance, and history",
+                Routine::Session => "Ending and reopening a trading session",
+                Routine::Warning => "Reading a risk warning",
             },
             Self::Order(OrderOutcome::Fill) => "Order placed / awaiting fill",
+            Self::Order(OrderOutcome::PartialFill) => "Order partially filled / awaiting remainder",
             Self::Order(OrderOutcome::Cancel) => "Placing and canceling order",
+            Self::Order(OrderOutcome::Reject) => "Order rejected / reading the error",
         }
     }
 
-    fn interactions(self) -> impl Iterator<Item = (SfxKind, Region)> {
+    fn interactions(self) -> impl Iterator<Item = (Interaction, Region)> {
+        use Interaction::{Sound as S, Ui as U};
         use Region::*;
         use Routine as R;
         use SfxKind::*;
-        let interactions: &[(SfxKind, Region)] = match self {
-            Self::Routine(R::Browse) => {
-                &[(Click, Watchlist), (SecondaryClick, Chart), (Cancel, Chart)]
-            }
-            Self::Routine(R::Scroll) => &[(Scroll, Positions), (ScrollBoundary, Positions)],
+        use UiEvent::*;
+        let interactions: &[(Interaction, Region)] = match self {
+            Self::Routine(R::Browse) => &[
+                (U(InstrumentSelect), Watchlist),
+                (U(BookOpen), Chart),
+                (S(SecondaryClick), Chart),
+                (S(Cancel), Chart),
+                (U(WatchlistEdit), Watchlist),
+                (U(UiIdle), Watchlist),
+            ],
+            Self::Routine(R::Scroll) => &[
+                (U(UiScroll), Positions),
+                (U(UiScroll), Positions),
+                (U(UiHover), Positions),
+                (S(ScrollBoundary), Positions),
+            ],
             Self::Routine(R::Scrollbar) => &[
-                (ScrollbarGrab, Watchlist),
-                (ScrollbarMove, Watchlist),
-                (ScrollbarMove, Watchlist),
-                (ScrollbarRelease, Watchlist),
+                (S(ScrollbarGrab), Watchlist),
+                (S(ScrollbarMove), Watchlist),
+                (S(ScrollbarMove), Watchlist),
+                (S(ScrollbarRelease), Watchlist),
             ],
             Self::Routine(R::Rearrange) => &[
-                (DragStart, Watchlist),
-                (DragOver, Chart),
-                (DragOver, OrderTicket),
-                (Drop, Positions),
+                (S(DragStart), Watchlist),
+                (S(DragOver), Chart),
+                (S(DragOver), OrderTicket),
+                (S(Drop), Positions),
             ],
             Self::Routine(R::RejectedDrop) => &[
-                (DragStart, Positions),
-                (DragOver, Chart),
-                (DropRejected, OrderTicket),
+                (S(DragStart), Positions),
+                (S(DragOver), Chart),
+                (S(DropRejected), OrderTicket),
             ],
             Self::Routine(R::Chart) => &[
-                (ZoomIn, Chart),
-                (ZoomIn, Chart),
-                (ZoomOut, Chart),
-                (Resize, ChartTools),
-                (Resize, ChartTools),
+                (U(InstrumentSelect), Watchlist),
+                (U(ChartZoomIn), Chart),
+                (U(ChartZoomIn), Chart),
+                (U(ChartZoomOut), Chart),
+                (U(ChartTimeframeChange), ChartTools),
+                (U(ChartPan), Chart),
+                (U(ChartTimeframeChange), ChartTools),
+                (U(ChartPan), Chart),
+                (U(OrderTicketOpen), OrderTicket),
+                (S(Resize), ChartTools),
             ],
             Self::Routine(R::Tabs) => &[
-                (Click, Tabs),
-                (TabOpen, Tabs),
-                (Focus, Chart),
-                (Blur, Chart),
-                (TabClose, Tabs),
+                (S(Click), Tabs),
+                (S(TabOpen), Tabs),
+                (S(Focus), Chart),
+                (S(Blur), Chart),
+                (S(TabClose), Tabs),
             ],
             Self::Routine(R::Dialog) => &[
-                (Click, ChartTools),
-                (DialogOpen, Dialog),
-                (Focus, Dialog),
-                (Confirm, Dialog),
-                (Blur, Dialog),
-                (DialogClose, Dialog),
+                (S(Click), ChartTools),
+                (U(PopupOpen), Dialog),
+                (U(PopupRead), Dialog),
+                (S(Confirm), Dialog),
+                (S(Blur), Dialog),
+                (U(PopupDismiss), Dialog),
             ],
             Self::Routine(R::Search) => &[
-                (Focus, SearchField),
-                (Search, SearchField),
-                (Click, Watchlist),
-                (Confirm, Watchlist),
-                (Blur, SearchField),
+                (S(Focus), SearchField),
+                (U(InstrumentSearch), SearchField),
+                (U(UiIdle), SearchField),
+                (U(SearchClear), SearchField),
+                (U(InstrumentSearch), SearchField),
+                (U(SearchClear), SearchField),
+                (U(InstrumentSearch), SearchField),
+                (U(InstrumentSelect), Watchlist),
+                (S(Confirm), Watchlist),
+                (S(Blur), SearchField),
             ],
             Self::Routine(R::Settings) => &[
-                (ToggleOn, ChartTools),
-                (ToggleOff, ChartTools),
-                (DestructiveClick, Tabs),
-                (Cancel, Tabs),
+                (S(ToggleOn), ChartTools),
+                (S(ToggleOff), ChartTools),
+                (S(DestructiveClick), Tabs),
+                (S(Cancel), Tabs),
             ],
             Self::Routine(R::Refresh) => &[
-                (Click, ChartTools),
-                (DataRefresh, Chart),
-                (Notification, Alerts),
+                (S(Click), ChartTools),
+                (S(DataRefresh), Chart),
+                (S(Notification), Alerts),
             ],
             Self::Routine(R::Connection) => &[
-                (Disconnect, Status),
-                (Warning, Alerts),
-                (Error, Alerts),
-                (Connect, Status),
-                (DataRefresh, Chart),
+                (U(ConnectionLag), Status),
+                (S(Warning), Alerts),
+                (S(Error), Alerts),
+                (S(Connect), Status),
+                (S(DataRefresh), Chart),
+            ],
+            Self::Routine(R::Book) => &[
+                (U(InstrumentSelect), Watchlist),
+                (U(OrderTicketOpen), OrderTicket),
+                (U(BookOpen), Chart),
+                (U(BookScroll), Chart),
+                (U(OrderPriceEdit), OrderTicket),
+                (U(OrderPriceEdit), OrderTicket),
+            ],
+            Self::Routine(R::Portfolio) => &[
+                (U(PortfolioView), Positions),
+                (U(HistoryOpen), Positions),
+                (U(BalanceView), Positions),
+                (U(OrderTicketOpen), OrderTicket),
+                (U(OrderQuantityEdit), OrderTicket),
+                (U(OrderQuantityEdit), OrderTicket),
+                (U(UiIdle), Chart),
+            ],
+            Self::Routine(R::Session) => &[
+                (U(SessionEnd), Status),
+                (U(MarketOpen), Tabs),
+                (U(InstrumentSelect), Watchlist),
+                (U(BookOpen), Chart),
+            ],
+            Self::Routine(R::Warning) => &[
+                (U(UiHover), Chart),
+                (U(PopupOpen), Dialog),
+                (U(PopupRead), Dialog),
+                (U(PopupDismiss), Dialog),
+                (U(WarningOpen), Dialog),
+                (U(PopupDismiss), Dialog),
             ],
             Self::Order(OrderOutcome::Fill) => &[
-                (Click, OrderTicket),
-                (Focus, OrderTicket),
-                (Confirm, OrderTicket),
-                (OrderCreate, OrderTicket),
-                (OrderFill, Positions),
+                (U(OrderTicketOpen), OrderTicket),
+                (S(Focus), OrderTicket),
+                (U(OrderSideSelect), OrderTicket),
+                (U(OrderQuantityEdit), OrderTicket),
+                (U(OrderSubmit), OrderTicket),
+                (U(ConnectionLag), Status),
+                (U(OrderAccepted), OrderTicket),
+                (U(OrderFilled), Positions),
+                (U(PositionOpen), Positions),
+                (U(PositionClose), Positions),
+                (U(BalanceView), Positions),
+            ],
+            Self::Order(OrderOutcome::PartialFill) => &[
+                (U(OrderTicketOpen), OrderTicket),
+                (S(Focus), OrderTicket),
+                (U(OrderSideSelect), OrderTicket),
+                (U(OrderPriceEdit), OrderTicket),
+                (U(OrderSubmit), OrderTicket),
+                (U(OrderAccepted), OrderTicket),
+                (U(OrderPartialFill), Positions),
+                (U(OrderFilled), Positions),
+                (U(BalanceView), Positions),
             ],
             Self::Order(OrderOutcome::Cancel) => &[
-                (Click, OrderTicket),
-                (Confirm, OrderTicket),
-                (OrderCreate, OrderTicket),
-                (SecondaryClick, Positions),
-                (DestructiveClick, Positions),
-                (OrderCancel, Positions),
+                (U(OrderTicketOpen), OrderTicket),
+                (U(OrderSideSelect), OrderTicket),
+                (U(OrderSubmit), OrderTicket),
+                (U(OrderAccepted), OrderTicket),
+                (S(SecondaryClick), Positions),
+                (U(OrderCancelRequest), Positions),
+                (U(OrderCanceled), Positions),
+                (U(OrderTicketOpen), OrderTicket),
+            ],
+            Self::Order(OrderOutcome::Reject) => &[
+                (U(OrderTicketOpen), OrderTicket),
+                (U(OrderQuantityEdit), OrderTicket),
+                (U(OrderSubmit), OrderTicket),
+                (U(OrderRejected), Alerts),
+                (U(PopupOpen), Dialog),
+                (U(PopupRead), Dialog),
+                (U(PopupDismiss), Dialog),
             ],
         };
         interactions.iter().copied()
@@ -256,6 +411,7 @@ struct Simulation {
     market_index: usize,
     cursor: Position,
     hovered: Option<Region>,
+    thoughts: ThoughtDeck,
 }
 
 impl Simulation {
@@ -286,6 +442,7 @@ impl Simulation {
             market_index: 0,
             cursor: Region::Chart.position(rng),
             hovered: None,
+            thoughts: ThoughtDeck::default(),
         }
     }
 
@@ -316,6 +473,63 @@ impl Simulation {
 
     fn push_action(&mut self, action: Action, after: Duration) {
         self.events.push_back(Gesture { action, after });
+    }
+
+    fn push_ui(
+        &mut self,
+        event: UiEvent,
+        position: Position,
+        after: Duration,
+        rng: &mut fastrand::Rng,
+    ) {
+        self.push_action(
+            Action::Ui {
+                event,
+                pan: position.pan(),
+                intensity: Unit::new(0.42 + rng.f32() * 0.23)
+                    .expect("humanized intensity is normalized"),
+            },
+            after,
+        );
+    }
+
+    fn insert_thoughts(&mut self, rng: &mut fastrand::Rng) {
+        let mut end = Duration::ZERO;
+        let mut timeline: Vec<_> = self
+            .events
+            .drain(..)
+            .map(|gesture| {
+                let at = end;
+                end += gesture.after;
+                (at, gesture.action)
+            })
+            .collect();
+        let mut ui_events = timeline
+            .iter()
+            .filter_map(|&(at, action)| match action {
+                Action::Ui { event, .. } => Some((at, event)),
+                _ => None,
+            })
+            .peekable();
+        let mut thoughts = Vec::new();
+        while let Some((at, event)) = ui_events.next() {
+            self.thoughts.event();
+            if let Some(&(next_at, next)) = ui_events.peek() {
+                thoughts.extend(
+                    self.thoughts
+                        .select(event, next, next_at - at, rng)
+                        .into_iter()
+                        .map(|(thought, delay)| (at + delay, Action::Thought(thought))),
+                );
+            }
+        }
+        timeline.extend(thoughts);
+        timeline.sort_by_key(|&(at, _)| at);
+        let mut timeline = timeline.into_iter().peekable();
+        while let Some((at, action)) = timeline.next() {
+            let next_at = timeline.peek().map_or(end, |&(at, _)| at);
+            self.push_action(action, next_at - at);
+        }
     }
 
     fn mode(&mut self, mode: Mode) {
@@ -387,6 +601,18 @@ impl Simulation {
             let preset = self.markets[self.market_index];
             self.market_index += 1;
             self.push_action(Action::Market(preset), Duration::from_millis(100));
+            self.push_ui(
+                UiEvent::MarketSwitch,
+                self.cursor,
+                Duration::from_secs(3),
+                rng,
+            );
+            self.push_ui(
+                UiEvent::InstrumentSelect,
+                self.cursor,
+                Duration::from_secs(2),
+                rng,
+            );
         }
 
         // Cross nearby controls before settling on an action, like a moving mouse.
@@ -410,28 +636,29 @@ impl Simulation {
             }
         }
         let mut zoom_steps = [0.5, 0.95].into_iter();
-        for (kind, region) in self.workflow.interactions() {
+        for (interaction, region) in self.workflow.interactions() {
+            let kind = interaction.sound();
             let position = match kind {
-                SfxKind::Notification
-                | SfxKind::Warning
-                | SfxKind::Error
-                | SfxKind::DataRefresh
-                | SfxKind::Connect
-                | SfxKind::Disconnect
-                | SfxKind::OrderFill => region.position(rng),
+                Some(
+                    SfxKind::Notification
+                    | SfxKind::Warning
+                    | SfxKind::Error
+                    | SfxKind::DataRefresh
+                    | SfxKind::Connect
+                    | SfxKind::Disconnect
+                    | SfxKind::OrderFill,
+                ) => region.position(rng),
                 _ => {
                     self.visit(region, rng);
                     self.cursor
                 }
             };
-            if kind == SfxKind::Scroll {
-                self.scroll_burst(rng.usize(6..=10), rng);
-                continue;
-            }
             match kind {
-                SfxKind::DialogOpen => self.mode(Mode::Dialog),
-                SfxKind::Focus if region != Region::Dialog => self.mode(Mode::Focus),
-                SfxKind::ZoomIn => {
+                Some(SfxKind::DialogOpen | SfxKind::Warning) if region == Region::Dialog => {
+                    self.mode(Mode::Dialog)
+                }
+                Some(SfxKind::Focus) if region != Region::Dialog => self.mode(Mode::Focus),
+                Some(SfxKind::ZoomIn) => {
                     if zoom_steps.len() == 2 {
                         self.mode(Mode::Focus);
                     }
@@ -444,7 +671,7 @@ impl Simulation {
                         Duration::from_millis(100),
                     );
                 }
-                SfxKind::ZoomOut => self.push_action(
+                Some(SfxKind::ZoomOut) => self.push_action(
                     Action::Zoom(
                         Unit::new(0.05 + rng.f32() * 0.15)
                             .expect("overview zoom targets are normalized"),
@@ -453,29 +680,45 @@ impl Simulation {
                 ),
                 _ => {}
             }
-            let after = Duration::from_millis(match kind {
-                SfxKind::ScrollbarMove | SfxKind::DragOver | SfxKind::Resize => rng.u64(100..=290),
-                SfxKind::DialogOpen | SfxKind::Focus => rng.u64(4_000..=8_000),
-                SfxKind::ZoomIn if zoom_steps.len() == 0 => rng.u64(4_000..=8_000),
-                SfxKind::Search => rng.u64(550..=1_500),
-                SfxKind::OrderCreate => rng.u64(1_800..=4_000),
-                SfxKind::Disconnect => rng.u64(1_200..=2_800),
+            let pause = Duration::from_millis(match interaction {
+                Interaction::Ui(UiEvent::UiIdle | UiEvent::SessionEnd) => rng.u64(6_000..=10_000),
+                Interaction::Ui(UiEvent::PopupOpen | UiEvent::WarningOpen) => {
+                    rng.u64(4_000..=8_000)
+                }
+                Interaction::Ui(UiEvent::ChartZoomIn) if zoom_steps.len() == 0 => {
+                    rng.u64(4_000..=8_000)
+                }
+                Interaction::Ui(_) => rng.u64(2_000..=6_000),
+                Interaction::Sound(SfxKind::Focus) => rng.u64(4_000..=8_000),
+                Interaction::Sound(
+                    SfxKind::ScrollbarMove | SfxKind::DragOver | SfxKind::Resize,
+                ) => rng.u64(100..=290),
                 _ => rng.u64(220..=800),
             });
-            self.push(kind, position, after, rng);
+            let after = if kind == Some(SfxKind::DialogClose) {
+                Duration::from_millis(100)
+            } else {
+                pause
+            };
+            match interaction {
+                Interaction::Sound(kind) => self.push(kind, position, after, rng),
+                Interaction::Ui(event) => self.push_ui(event, position, after, rng),
+            }
             match kind {
-                SfxKind::DialogClose | SfxKind::ZoomOut => self.mode(Mode::Browse),
-                SfxKind::Blur if region != Region::Dialog => self.mode(Mode::Browse),
+                Some(SfxKind::DialogClose) => self.push_action(Action::Mode(Mode::Browse), pause),
+                Some(SfxKind::ZoomOut) => self.mode(Mode::Browse),
+                Some(SfxKind::Blur) if region != Region::Dialog => self.mode(Mode::Browse),
                 _ => {}
             }
         }
-        if matches!(self.workflow, Workflow::Order(OrderOutcome::Fill)) {
+        if matches!(self.workflow, Workflow::Order(_)) {
             self.mode(Mode::Browse);
         }
         self.events
             .back_mut()
             .expect("workflows contain actions")
             .after = Duration::from_millis(rng.u64(1_200..=4_500));
+        self.insert_thoughts(rng);
     }
 }
 
@@ -544,8 +787,10 @@ impl UserActivity {
         if running.events.is_empty() && matches!(running.workflow, Workflow::Order(_)) {
             running.next_order_at = elapsed + Duration::from_secs(self.rng.u64(45..=90));
             running.order_outcome = match running.order_outcome {
-                OrderOutcome::Fill => OrderOutcome::Cancel,
-                OrderOutcome::Cancel => OrderOutcome::Fill,
+                OrderOutcome::Fill => OrderOutcome::PartialFill,
+                OrderOutcome::PartialFill => OrderOutcome::Cancel,
+                OrderOutcome::Cancel => OrderOutcome::Reject,
+                OrderOutcome::Reject => OrderOutcome::Fill,
             };
         }
         Ok(())

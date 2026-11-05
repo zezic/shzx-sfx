@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 
 use super::{
     App, Control, EditorPage, MarketField, Overlay, Preset, ReverbBus, ReverbField, SfxParameter,
-    Tab, TonalParameter, ticker_choices,
+    Tab, TonalParameter, events::LoggedEventKind, ticker_choices,
 };
 use crate::MixLayer;
 
@@ -504,19 +504,44 @@ fn user_events(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         return;
     }
-    let visible = entries.len().min(usize::from(area.height - 1));
-    let skipped = entries.len() - visible;
-    let first_row = area.bottom() - visible as u16;
-    for (index, entry) in entries.skip(skipped).enumerate() {
+    let mut bottom = area.bottom();
+    for entry in entries.rev() {
+        let remaining = bottom - area.y - 1;
+        if remaining == 0 {
+            break;
+        }
+        let prefix = format!(
+            "{:7.2}s {:4} ",
+            entry.at.as_secs_f64(),
+            if matches!(entry.kind, LoggedEventKind::Thought(_)) {
+                ""
+            } else {
+                entry.source.label()
+            },
+        );
+        let paragraph = match entry.kind {
+            LoggedEventKind::Command(command) => {
+                Paragraph::new(format!("{prefix}{}", command_text(command)))
+            }
+            LoggedEventKind::Activity(event) => {
+                Paragraph::new(format!("{prefix}{}", event.label()))
+            }
+            LoggedEventKind::Thought(thought) => Paragraph::new(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(
+                    format!("*{}*", thought.text),
+                    Style::default().add_modifier(Modifier::ITALIC),
+                ),
+            ]))
+            .wrap(Wrap { trim: false }),
+        }
+        .style(Style::default().fg(TEXT));
+        let lines = paragraph.line_count(area.width);
+        let visible = lines.min(usize::from(remaining)) as u16;
+        bottom -= visible;
         frame.render_widget(
-            Paragraph::new(format!(
-                "{:7.2}s {:4} {}",
-                entry.at.as_secs_f64(),
-                entry.source.label(),
-                command_text(entry.command),
-            ))
-            .style(Style::default().fg(TEXT)),
-            Rect::new(area.x, first_row + index as u16, area.width, 1),
+            paragraph.scroll(((lines - usize::from(visible)) as u16, 0)),
+            Rect::new(area.x, bottom, area.width, visible),
         );
     }
 }
@@ -3209,6 +3234,67 @@ mod tests {
                 monitor.contains("BACKGROUND MONITOR"),
                 "{width}x{height}: {monitor}"
             );
+        }
+    }
+
+    #[test]
+    fn scene_event_log_wraps_thoughts_with_asterisks_and_italic_text_between_actions() {
+        use super::super::activity::thoughts::{UiEvent, library};
+
+        let thought = library()
+            .thoughts
+            .iter()
+            .find(|thought| thought.id == "TT009")
+            .unwrap();
+        for width in [40, 78, 84] {
+            let mut app = app();
+            app.event_log.record_activity(UiEvent::InstrumentSearch);
+            app.event_log.record_thought(thought);
+            app.event_log.record_activity(UiEvent::UiIdle);
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| user_events(frame, frame.area(), &app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows = (0..8)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let text = rows.join("\n");
+            let compact = text.split_whitespace().collect::<String>();
+            let expected = format!("*{}*", thought.text)
+                .split_whitespace()
+                .collect::<String>();
+            assert!(compact.contains(&expected), "{width}: {text}");
+            assert_eq!(text.matches('*').count(), 2, "{width}: {text}");
+            assert_eq!(text.matches("SIM").count(), 2, "{width}: {text}");
+            assert!(text.find("instrument.search").unwrap() < text.find('*').unwrap());
+            assert!(text.rfind('*').unwrap() < text.find("ui.idle").unwrap());
+            assert!(rows[7].contains("ui.idle"));
+            let italic = buffer
+                .content
+                .iter()
+                .filter(|cell| cell.modifier.contains(Modifier::ITALIC))
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert_eq!(
+                italic.split_whitespace().collect::<String>(),
+                expected,
+                "{width}: {text}"
+            );
+            if width == 40 {
+                assert!(
+                    (0..8)
+                        .filter(|&y| (0..width)
+                            .any(|x| buffer[(x, y)].modifier.contains(Modifier::ITALIC)))
+                        .count()
+                        > 1,
+                    "thought should wrap at width {width}: {text}"
+                );
+            }
         }
     }
 

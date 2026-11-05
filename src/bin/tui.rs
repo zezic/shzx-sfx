@@ -540,30 +540,55 @@ impl App {
         let market = self.market;
         let mut accepted = None;
         let result = self.activity.advance(elapsed, &mut |action| {
+            let trigger = |kind, pan, intensity| {
+                Command::Trigger(SfxEvent {
+                    pan,
+                    intensity,
+                    edits: edits.get(&kind).copied().unwrap_or_default(),
+                    ..SfxEvent::new(kind)
+                })
+            };
             let command = match action {
                 activity::Action::Trigger {
                     kind,
                     pan,
                     intensity,
-                } => Command::Trigger(SfxEvent {
-                    pan,
-                    intensity,
-                    edits: edits.get(&kind).copied().unwrap_or_default(),
-                    ..SfxEvent::new(kind)
-                }),
+                } => trigger(kind, pan, intensity),
                 activity::Action::Mode(mode) => Command::Mode(mode),
                 activity::Action::Market(preset) => Command::Market(MarketContext {
                     zoom: market.zoom,
                     ..preset.market()
                 }),
                 activity::Action::Zoom(zoom) => Command::Market(MarketContext { zoom, ..market }),
+                activity::Action::Ui {
+                    event,
+                    pan,
+                    intensity,
+                } => {
+                    if let Some(kind) = event.sound() {
+                        send(trigger(kind, pan, intensity))?;
+                    }
+                    accepted = Some(events::LoggedEventKind::Activity(event));
+                    return Ok(());
+                }
+                activity::Action::Thought(thought) => {
+                    accepted = Some(events::LoggedEventKind::Thought(thought));
+                    return Ok(());
+                }
             };
             send(command)?;
-            accepted = Some(command);
+            accepted = Some(events::LoggedEventKind::Command(command));
             Ok(())
         });
-        if let Some(command) = accepted {
-            self.apply_accepted(command, events::EventSource::Simulator);
+        match accepted {
+            Some(events::LoggedEventKind::Command(command)) => {
+                self.apply_accepted(command, events::EventSource::Simulator);
+            }
+            Some(events::LoggedEventKind::Activity(event)) => self.event_log.record_activity(event),
+            Some(events::LoggedEventKind::Thought(thought)) => {
+                self.event_log.record_thought(thought)
+            }
+            None => {}
         }
         if let Err(error) = result {
             self.notice = format!("User activity pending: {error}");
