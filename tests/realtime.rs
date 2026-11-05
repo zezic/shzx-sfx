@@ -5,10 +5,11 @@ use std::{
 };
 
 use shzx_sfx::{
-    Command, DataTransmission, DataTransmissionCommand, MarketContext, Mix, Mode, OutputGain, Pan,
-    RenderConfig, Renderer, ReverbSettings, SfxEdits, SfxEvent, SfxFilterBand, SfxFmIndex,
-    SfxFmRatio, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerState, SfxMilliseconds, SfxScale,
-    SfxStepRate, SfxTonalEdits, SfxTonalRate, SfxTonalSequence, SpatialMode, Symbol, Trend, Unit,
+    Command, DataTransmission, DataTransmissionCommand, HarmonyMode, MarketContext, Mix, Mode,
+    OutputGain, Pan, RenderConfig, Renderer, ReverbSettings, SfxEdits, SfxEvent, SfxFilterBand,
+    SfxFmIndex, SfxFmRatio, SfxKind, SfxLayer, SfxLayerEdits, SfxLayerState, SfxMilliseconds,
+    SfxScale, SfxStepRate, SfxTonalEdits, SfxTonalRate, SfxTonalSequence, SpatialMode, Symbol,
+    Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -178,7 +179,10 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             }),
             Command::Reverb(ReverbSettings::default()),
             Command::Symbol(Symbol::new("IBM").unwrap()),
+            Command::Harmony(HarmonyMode::Dissonant),
+            Command::Symbol(Symbol::new("AAPL").unwrap()),
             Command::Symbol(Symbol::new("MSFT").unwrap()),
+            Command::Harmony(HarmonyMode::Diatonic),
             Command::Trigger(SfxEvent {
                 layers: shzx_sfx::SfxLayerSelection::Only(shzx_sfx::SfxLayer::Tonal),
                 ..SfxEvent::new(SfxKind::Confirm)
@@ -198,6 +202,7 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             Command::DataTransmission(DataTransmissionCommand::End),
         ]);
         let mut block = [[0.0_f32; 2]; 64];
+        let mut dissonant_seen = false;
         let scope = AllocationScope::begin();
         // Include the very first rendered frame: initialization must not leak into
         // the native callback. A small pool exercises voice replacement repeatedly.
@@ -205,7 +210,8 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             for &command in &commands {
                 renderer.apply(command);
                 renderer.render(&mut block);
-                black_box(renderer.snapshot());
+                let snapshot = black_box(renderer.snapshot());
+                dissonant_seen |= snapshot.background.harmony.mode == HarmonyMode::Dissonant;
             }
         }
         // Exercise the sequencer's internal trigger path and pulse-budget expiry.
@@ -235,6 +241,7 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
             calls.deallocations, 0,
             "deallocator calls during rendering: {calls:?}"
         );
+        assert!(dissonant_seen);
         let snapshot = renderer.snapshot();
         assert!(snapshot.stolen_voices > 0);
         assert!(snapshot.coalesced_events > 0);

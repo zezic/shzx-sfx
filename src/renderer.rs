@@ -1,9 +1,9 @@
 use serde::Serialize;
 
 use crate::{
-    BackgroundSnapshot, Chord, ClockState, Command, GeneratedEvent, HarmonySnapshot, MarketContext,
-    Mix, Mode, ParameterSnapshot, RenderConfig, Result, ReverbParameters, ReverbSettings,
-    SpatialMode, Symbol, TransmissionSnapshot, Unit,
+    BackgroundSnapshot, Chord, Command, GeneratedEvent, HarmonySnapshot, MarketContext, Mix, Mode,
+    ParameterSnapshot, RenderConfig, Result, ReverbParameters, ReverbSettings, SpatialMode, Symbol,
+    TransmissionSnapshot, Unit,
     background::Background,
     dsp::{HighPass, LowPass, Smooth, limit_stereo},
     harmony::Harmony,
@@ -105,12 +105,15 @@ impl Renderer {
         let accent_reverb = new_reverb(config.sample_rate, config.reverb.accents);
         let mut master = Smooth::new(0.0, 0.025, rate);
         master.target(config.mix.master.get());
-        let harmony = Harmony::new(config.sample_rate, config.symbol.root());
+        let harmony = Harmony::new(
+            config.sample_rate,
+            Chord::from_symbol(config.symbol, config.harmony_mode),
+        );
         Ok(Self {
             symbol: config.symbol,
             config,
             sample: 0,
-            background: Background::new(config.sample_rate, config.seed, harmony.chord),
+            background: Background::new(config.sample_rate, config.seed, harmony.chord()),
             sfx: SfxBank::new(
                 config.sample_rate,
                 config.max_voices,
@@ -159,8 +162,16 @@ impl Renderer {
         match command {
             Command::Symbol(symbol) => {
                 self.symbol = symbol;
-                if self.harmony.set_root(symbol.root()) {
-                    self.background.chord(self.harmony.chord);
+                if self.harmony.set_symbol(symbol) {
+                    self.background.chord(self.harmony.chord());
+                }
+            }
+            Command::Harmony(mode) => {
+                if self
+                    .harmony
+                    .set_mode(mode, self.symbol, self.config.sample_rate, self.sample)
+                {
+                    self.background.chord(self.harmony.chord());
                 }
             }
             Command::Market(market) => {
@@ -218,7 +229,7 @@ impl Renderer {
             .harmony
             .update(self.sample, self.config.sample_rate, market, focus > 0.4)
         {
-            self.background.chord(self.harmony.chord);
+            self.background.chord(self.harmony.chord());
         }
         self.background
             .control(self.sample, market, focus, self.symbol);
@@ -381,7 +392,7 @@ impl Renderer {
             output_gain_db: 20.0 * self.output_gain.value().log10(),
             reverb: self.reverb,
             spatial: self.spatial,
-            chord: self.harmony.chord,
+            chord: self.harmony.chord(),
             cutoff_hz: self.cutoff_hz,
             focus_amount: self.focus.value(),
             zoom_amount: self.zoom_amount,
@@ -448,16 +459,14 @@ impl Renderer {
                 target: self.reverb.environment.width.get() * reverb_width_scale(target_focus),
             },
             harmony: HarmonySnapshot {
-                root: self.harmony.chord.root,
+                mode: self.harmony.chord().mode(),
+                root: self.harmony.chord().root(),
                 root_transition: self.background.root_transition(),
                 transition: self.background.chord_transition(),
                 next: self.harmony.next_choice(market),
-                clock: ClockState::at(
-                    self.harmony.next_change,
-                    self.sample,
-                    self.config.sample_rate as f32,
-                    focus > 0.4,
-                ),
+                clock: self
+                    .harmony
+                    .clock(self.sample, self.config.sample_rate, focus > 0.4),
             },
             harmonic_swell: self.background.harmonic_swell(),
             details: self.background.details(self.sample),

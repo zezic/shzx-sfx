@@ -3,6 +3,8 @@
 pub enum Error {
     #[error("invalid symbol: {0}")]
     InvalidSymbol(&'static str),
+    #[error("invalid chromatic chord: {0}")]
+    InvalidChromaticChord(&'static str),
     #[error("invalid {name}: {value}; expected {expected}")]
     InvalidParameter {
         name: &'static str,

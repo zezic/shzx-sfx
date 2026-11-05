@@ -9,9 +9,9 @@ use std::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use shzx_sfx::{
-    Command, DataTransmission, DataTransmissionCommand, MarketContext, Mix, Mode, OutputGain, Pan,
-    RenderConfig, Renderer, ReverbSettings, SfxEvent, SfxKind, SfxLayerSelection, Snapshot,
-    SpatialMode, Symbol, Trend, Unit,
+    Command, DataTransmission, DataTransmissionCommand, HarmonyMode, MarketContext, Mix, Mode,
+    OutputGain, Pan, RenderConfig, Renderer, ReverbSettings, SfxEvent, SfxKind, SfxLayerSelection,
+    Snapshot, SpatialMode, Symbol, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -67,9 +67,12 @@ struct InspectArgs {
 
 #[derive(Clone, Args)]
 struct EngineArgs {
-    /// Ticker used to select a deterministic harmonic base in the shared scale.
+    /// Ticker used to select a deterministic harmonic base.
     #[arg(long, default_value = "AAPL")]
     symbol: String,
+    /// Use a fixed chromatic dissonant harmony selected by the ticker.
+    #[arg(long)]
+    dissonance: bool,
     #[arg(long, default_value_t = 48_000)]
     sample_rate: u32,
     #[arg(long, default_value_t = 0x5348_495a_4558)]
@@ -101,6 +104,11 @@ impl EngineArgs {
         }
         Ok(RenderConfig {
             symbol: Symbol::new(&self.symbol)?,
+            harmony_mode: if self.dissonance {
+                HarmonyMode::Dissonant
+            } else {
+                HarmonyMode::Diatonic
+            },
             sample_rate: self.sample_rate,
             seed: self.seed,
             max_voices: self.max_voices,
@@ -436,6 +444,7 @@ struct ScheduledCommand {
 enum TraceRecord<'a> {
     Config {
         symbol: Symbol,
+        harmony_mode: HarmonyMode,
         seed: u64,
         sample_rate: u32,
         max_voices: usize,
@@ -827,6 +836,7 @@ fn export(
         &mut trace_writer,
         TraceRecord::Config {
             symbol: config.symbol,
+            harmony_mode: config.harmony_mode,
             seed: config.seed,
             sample_rate: config.sample_rate,
             max_voices: config.max_voices,
@@ -1370,6 +1380,7 @@ fn repl_command(line: &str, mix: Mix, reverb: ReverbSettings) -> CliResult<ReplA
             activity: Unit::new(words[6].parse()?)?,
         }))),
         ("mode", 2) => Ok(ReplAction::send(Command::Mode(words[1].parse()?))),
+        ("harmony", 2) => Ok(ReplAction::send(Command::Harmony(words[1].parse()?))),
         ("spatial", 2) => Ok(ReplAction::send(Command::Spatial(words[1].parse()?))),
         ("symbol", 2) => Ok(ReplAction::send(Command::Symbol(Symbol::new(words[1])?))),
         ("transmission", 2..=3) => {
@@ -1470,13 +1481,48 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
 #[cfg(feature = "playback")]
 fn repl_help() {
     println!(
-        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  symbol TICKER                  choose a deterministic root in the shared scale\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  mix demonic-voices|demonic-stutters|flying-coins|laser-beams LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody|accents send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
+        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  harmony diatonic|dissonant\n  symbol TICKER                  select the ticker harmony\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  mix demonic-voices|demonic-stutters|flying-coins|laser-beams LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody|accents send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dissonance_is_opt_in_and_reaches_the_startup_configuration() {
+        for (flags, expected) in [
+            (Vec::new(), HarmonyMode::Diatonic),
+            (vec!["--dissonance"], HarmonyMode::Dissonant),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["shzx-sfx", "render", "--output", "/tmp/harmony.wav"]
+                    .into_iter()
+                    .chain(flags),
+            )
+            .unwrap();
+            let Action::Render(args) = cli.command else {
+                unreachable!()
+            };
+            assert_eq!(args.engine.config().unwrap().harmony_mode, expected);
+        }
+    }
+
+    #[cfg(feature = "playback")]
+    #[test]
+    fn repl_harmony_commands_preserve_the_typed_mode() {
+        for mode in [HarmonyMode::Diatonic, HarmonyMode::Dissonant] {
+            let ReplAction::Send(command) = repl_command(
+                &format!("harmony {mode}"),
+                Mix::default(),
+                ReverbSettings::default(),
+            )
+            .unwrap() else {
+                panic!("harmony edits send a command")
+            };
+            assert_eq!(*command, Command::Harmony(mode));
+        }
+    }
 
     #[cfg(feature = "tui")]
     #[test]

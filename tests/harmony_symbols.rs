@@ -98,10 +98,13 @@ fn symbol_changes_crossfade_roots_while_market_updates_keep_the_selected_base() 
     renderer.apply(Command::Symbol(symbol));
     let requested = renderer.snapshot();
     assert_eq!(requested.symbol, symbol);
-    assert_eq!(requested.background.harmony.root, symbol.root());
+    assert_eq!(
+        requested.background.harmony.root,
+        symbol.root().pitch_class()
+    );
     assert!(matches!(requested.background.harmony.root_transition,
         RootTransition::Crossfading { from: source, to, progress, remaining_seconds }
-        if source == from && to == symbol.root() && progress == Unit::ZERO && remaining_seconds == 3.0));
+        if source == from && to == symbol.root().pitch_class() && progress == Unit::ZERO && remaining_seconds == 3.0));
     advance(&mut renderer, 800);
     let ongoing = renderer.snapshot().background.harmony.root_transition;
     renderer.apply(Command::Symbol(symbol));
@@ -125,8 +128,14 @@ fn symbol_changes_crossfade_roots_while_market_updates_keep_the_selected_base() 
             &mut renderer,
             if index == 0 { RATE as usize * 12 } else { 128 },
         );
-        assert_eq!(renderer.snapshot().background.harmony.root, symbol.root());
-        assert_eq!(renderer.snapshot().chord.root, symbol.root());
+        assert_eq!(
+            renderer.snapshot().background.harmony.root,
+            symbol.root().pitch_class()
+        );
+        assert_eq!(
+            renderer.snapshot().chord.root(),
+            symbol.root().pitch_class()
+        );
     }
 }
 
@@ -139,7 +148,10 @@ fn rapid_symbol_changes_finish_the_current_fade_before_the_latest_pending_root()
     advance(&mut renderer, RATE as usize);
     let first_fade = renderer.snapshot().background.harmony.root_transition;
     renderer.apply(Command::Symbol(latest));
-    assert_eq!(renderer.snapshot().background.harmony.root, latest.root());
+    assert_eq!(
+        renderer.snapshot().background.harmony.root,
+        latest.root().pitch_class()
+    );
     assert_eq!(
         renderer.snapshot().background.harmony.root_transition,
         first_fade
@@ -147,13 +159,13 @@ fn rapid_symbol_changes_finish_the_current_fade_before_the_latest_pending_root()
     advance(&mut renderer, RATE as usize * 2 + 128);
     assert!(
         matches!(renderer.snapshot().background.harmony.root_transition,
-        RootTransition::Crossfading { from, to, .. } if from == first.root() && to == latest.root())
+        RootTransition::Crossfading { from, to, .. } if from == first.root().pitch_class() && to == latest.root().pitch_class())
     );
     advance(&mut renderer, RATE as usize * 3 + 128);
     assert_eq!(
         renderer.snapshot().background.harmony.root_transition,
         RootTransition::Steady {
-            root: latest.root()
+            root: latest.root().pitch_class()
         }
     );
     assert_eq!(

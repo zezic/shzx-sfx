@@ -260,6 +260,7 @@ fn mute_restores_the_previous_level_and_is_recoverable_from_an_initial_zero() {
 #[test]
 fn reset_restores_initial_controls_and_submits_each_relevant_state() {
     let mut app = configured_app(RenderConfig {
+        harmony_mode: HarmonyMode::Dissonant,
         mix: Mix {
             harmony: Unit::new(0.22).unwrap(),
             ..Mix::default()
@@ -282,12 +283,14 @@ fn reset_restores_initial_controls_and_submits_each_relevant_state() {
     assert_eq!(app.spatial, app.initial_spatial);
     assert_eq!(app.market, MarketContext::default());
     assert_eq!(app.mode, Mode::Browse);
+    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
     for expected in [
         Command::Mix(app.initial_mix),
         Command::Spatial(app.initial_spatial),
         Command::Market(MarketContext::default()),
         Command::Mode(Mode::Browse),
         Command::Reverb(app.initial_reverb),
+        Command::Harmony(HarmonyMode::Dissonant),
     ] {
         assert!(commands.contains(&expected), "missing command {expected:?}");
     }
@@ -863,4 +866,60 @@ fn tonal_rate_endpoint_edits_preserve_the_other_endpoint_and_reset_to_the_palett
     app.activate(Control::ResetTonal, &mut send);
     assert_eq!(app.edited_recipe().tonal_rate, palette);
     assert!(app.current_edits().tonal.step_rate.is_none());
+}
+
+#[test]
+fn ticker_grid_sends_only_symbol_commands_and_keeps_rejected_selections_unchanged() {
+    let mut app = app();
+    let choices: Vec<_> = ticker_choices().collect();
+    assert_eq!(choices.len(), 24);
+    let mut accepted = Vec::new();
+    for symbol in choices {
+        let control = Control::PickSymbol(symbol);
+        assert!(app.focus_order().contains(&control));
+        app.focus = control;
+        app.key(key(KeyCode::Enter, KeyEventKind::Press), &mut |command| {
+            accepted.push(command);
+            Ok(())
+        });
+        assert_eq!(app.symbol, symbol);
+        assert_eq!(accepted.last(), Some(&Command::Symbol(symbol)));
+    }
+    assert_eq!(accepted.len(), 24);
+    assert!(
+        accepted
+            .iter()
+            .all(|command| matches!(command, Command::Symbol(_)))
+    );
+    let previous = app.symbol;
+    app.activate(
+        Control::PickSymbol(Symbol::new("AAPL").unwrap()),
+        &mut |_| Err(shzx_sfx::Error::QueueFull),
+    );
+    assert_eq!(app.symbol, previous);
+}
+
+#[test]
+fn harmony_buttons_apply_only_accepted_modes_and_reset_restores_the_startup_mode() {
+    let mut app = app();
+    let mut accepted = Vec::new();
+    app.activate(
+        Control::SetHarmony(HarmonyMode::Dissonant),
+        &mut |command| {
+            accepted.push(command);
+            Ok(())
+        },
+    );
+    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
+    assert_eq!(accepted, [Command::Harmony(HarmonyMode::Dissonant)]);
+    app.activate(Control::SetHarmony(HarmonyMode::Diatonic), &mut |_| {
+        Err(shzx_sfx::Error::QueueFull)
+    });
+    assert_eq!(app.harmony_mode, HarmonyMode::Dissonant);
+    app.activate(Control::Reset, &mut |command| {
+        accepted.push(command);
+        Ok(())
+    });
+    assert_eq!(app.harmony_mode, HarmonyMode::Diatonic);
+    assert!(accepted.contains(&Command::Harmony(HarmonyMode::Diatonic)));
 }

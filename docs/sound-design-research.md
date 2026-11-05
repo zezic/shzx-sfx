@@ -244,14 +244,15 @@ the CLI before connecting it to the terminal.
 
 ## Current implementation controls
 
-Ticker names select an anchor degree in A natural minor through a stable hash.
+In the default diatonic mode, ticker names select an anchor degree in A natural
+minor through a stable hash.
 Generated upper voicings retain minor or half-diminished quality over that
 pedal; scale membership keeps sounding harmony reverb tails compatible while
 the next ticker's pedal and pad crossfade. The base changes
 only on a symbol command. Continuous view updates shape the arrangement and
 the next chord choice within that base.
 
-Pad chord tones use octave folding, inversions, and dropped octaves to stay
+Diatonic pad chord tones use octave folding, inversions, and dropped octaves to stay
 below 420 Hz while preserving pitch classes, minor qualities, and chord
 symbols. The four voices remain distinct, sorted, and above the pedal;
 semitone neighbors created by folding are spread across octaves where possible.
@@ -458,7 +459,7 @@ excitation needs to be accounted for when choosing the relative formant
 levels. [Csound: pinkish](https://csound.com/docs/manual/pinkish.html)
 
 The implemented excitation uses pink noise for every utterance. It soft-clips
-the noise, adds a seeded 30..110 Hz sine at amplitude 0.25, applies a 6 dB
+the noise, adds a seeded 30..110 Hz sine at amplitude 0.1, applies a 6 dB
 boost, then soft-clips the mixture before the formant bank. This periodic
 component and nonlinear shaping are sound-design choices, rather than a model
 of normal vocal-fold excitation.
@@ -578,8 +579,8 @@ not the resulting acoustic formant level.
 
 The implementation retains a bounded parallel bank with peak-normalized
 second-order band-pass filters. Vowels and vowel-like glides use nominal
-noise-envelope targets of 6/0/-3 dB at F1/F2/F3. The 6 dB first-formant
-emphasis is the requested artistic compensation for background masking;
+noise-envelope targets of 12/-4/-12 dB at F1/F2/F3. The first-formant
+emphasis is the artistic compensation for background masking;
 these targets are not measured whisper ratios. Consonant noise bands use
 0/-6/-12 dB targets. A square-root frequency correction compensates the ideal
 pink source's nominal power slope; branch-gain calibration also accounts for
@@ -595,9 +596,54 @@ below 250 Hz, and emphasizes the region around 2 kHz. This is a documented
 breathy-voice stimulus method, not a mandatory natural-whisper filter.
 [Park et al., 2020, Methods: original author-hosted paper](https://sites.bu.edu/stepplab/files/2020/11/2020_JSLHR-20-00294.pdf)
 
-Preserve the requested pink-noise soft clip, 30..110 Hz sine at 0.25, +6 dB
+Preserve the requested pink-noise soft clip, 30..110 Hz sine at 0.1, +6 dB
 drive, and second soft clip before both formant and frication paths. The
 periodic component makes this a hybrid demonic voice informed by whisper
 measurements, rather than a physiological pure whisper. Keep source gain,
 spectral shaping, formant balance, and final mix level distinct when
 auditioning changes.
+
+
+## Opt-in ticker-derived chromatic harmony
+
+`HarmonyMode::Dissonant` selects four distinct pitch classes from all twelve
+chromatic notes, using only the normalized ticker's ASCII bytes. The rule is
+an engine design, not a musical-scale model or a claim that every generated
+set has the same perceived tension. Close intervals remain in its compact
+voicing to allow the requested dissonant color.
+
+The existing 64-bit FNV-1a ticker hash is reused: start at
+`0xcbf29ce484222325`, XOR each uppercase ASCII byte, and multiply by
+`0x100000001b3` with wrapping arithmetic. Digits and accepted punctuation
+contribute to the hash too. Starting with the typed pitch-class pool
+`[C,C#,D,D#,E,F,F#,G,G#,A,A#,B]`, perform four partial Fisher-Yates swaps.
+For zero-based round `i`:
+
+```text
+state = rotate_left(state, 17) * 0x100000001b3 + (i + 1)  // wrapping u64
+j = i + state % (12 - i)
+swap(pool[i], pool[j])
+```
+
+The first four pool entries are the chord, with the first selecting its bass
+pedal. The other three entries are stored in canonical pitch-class order, so
+equivalent sets with the same pedal compare equal. Their pad notes are sorted at MIDI `48 + pitch_class`, C3..B3, above
+the pedal's A1..G#2 register. Pitch classes remain typed through storage,
+commands, rendering, and monitoring. Validated chromatic chord decoding
+rejects duplicates and unknown pitch classes; no scale-degree placeholder
+represents an accidental.
+
+| Ticker | Pad pitch classes | Pedal |
+| --- | --- | --- |
+| AAPL | C#, E, F, F# | C# |
+| TSLA | C, D, G, B | D |
+| IBM | C#, G, A#, B | C# |
+| NVDA | F, F#, G#, A | F |
+
+Market data, random render seed, and elapsed time do not choose these notes.
+The harmony clock is fixed in this mode; ticker or harmony-mode commands
+crossfade through the existing pad/pedal banks. The ordinary market-driven
+A-natural-minor arrangement remains the default. CLI `--dissonance`, REPL
+`harmony dissonant`, and the Scene page's harmony selector opt into the
+chromatic mode. The Scene page also provides a mouse/keyboard grid of 24
+tickers for comparisons, with manual ticker entry retained.

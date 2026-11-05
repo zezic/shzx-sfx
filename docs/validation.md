@@ -5,7 +5,7 @@ These are host observations, not guarantees for other machines or devices.
 
 ## Checks
 
-- Targeted release checks: 11 passed (tone synthesis, ambience, allocation audit).
+- All-target release suite: 170 passed, with five preexisting tuning/expectation failures.
 - Headless compilation (`--no-default-features`) passed.
 - Strict all-target/all-feature Clippy, formatting, and Rustdoc passed.
 - Playback-only builds without terminal UI dependencies passed.
@@ -432,14 +432,14 @@ pink/sine excitation shapes letter articulations. Each utterance lasts
 0.4..7 seconds. Male/female formant centers use measured English-whisper
 profiles from the research notes. Their bandwidths are design values of
 200/150/175 Hz for F1/F2/F3, with nominal noise-envelope peak targets of
-6/0/-3 dB. The F1 emphasis compensates background masking. These are
+12/-4/-12 dB. The F1 emphasis compensates background masking. These are
 engineering settings, not universal whisper norms. Branch gains compensate
 pink-noise tilt and the 6.2 kHz low-pass response. Frequencies, bandwidths, and peak targets morph
 together; intentional +/-33% frequency excursions scale bandwidths with
 frequency to preserve Q. Morphs occupy the final 30 ms of each phone,
 capped at 55% of very short phones; branch gains smooth over 5 ms. Both
 delivery styles use the library pinking filter, soft-clip its output,
-add a seeded 30..110 Hz sine at 0.25 amplitude, apply +6 dB, and soft-clip
+add a seeded 30..110 Hz sine at 0.1 amplitude, apply +6 dB, and soft-clip
 again before the formant and frication filters. Peak-normalized resonators
 keep this distorted excitation controlled at 192 kHz. Actual-signal tests
 verify the periodic source contributes nonlinear harmonics without exceeding
@@ -472,16 +472,19 @@ The existing low-passed bed and its darker space keep their settings. Actual
 waveform tests compare send-zero and wet-zero renders against an audible
 tail, alongside isolated gain, ticker articulation, stereo, onset/dropout,
 frequency-band, EQ-response, transition-timing, and deterministic rendering
-checks. Eighteen new DSP and integration tests pass. The allocator audit includes active new sources,
+checks cover the source contracts. The allocator audit includes active new sources,
 mutations, formation starts/retirement, and reverb at 8, 48, and 192 kHz,
 with zero allocations or deallocations after construction.
 
-The current tone, ambient, and allocation checks pass all 11 targeted tests. Four unrelated baseline failures remain:
+The broad release suite reports 170 passes and five baseline failures:
 two sub tuning assertions expect less than 0.8% detuning despite the existing
 +/-0.24-semitone spread, and two harmony assertions expect a three-second
 crossfade despite the existing half-second increment. The sub failures were
 also reproduced from an untouched HEAD archive; the unchanged timing code and
-assertions establish the other two baseline mismatches. Formatting, all-target
+assertions establish the other two timing mismatches. The fifth failure is
+the voice spectral regression expecting the earlier 6/0/-3 dB formant targets
+while the current source is tuned to 12/-4/-12 dB. That voice source and test
+are unchanged by the harmony feature. Formatting, all-target
 Clippy with warnings denied and the headless build pass. CLI/TUI test
 coverage includes the four new gains, activity monitoring, and five reverb
 buses at 80x24 and larger sizes.
@@ -509,18 +512,14 @@ window measures -68.10 dBFS. These are signal measurements, not a listening
 verdict. WAVs, JSONL traces, measurements, and repeatable export/analysis
 scripts are in `/private/tmp/shzx-sfx-voice-f1-boost/`.
 
-Seventy-two actual sustained-vowel cases cover male/female I/A/U/O profiles,
-30/70/110 Hz excitation sines, and three noise seeds. Averaged 32768-point
-Hann spectra exclude coherent harmonic main lobes and smooth the noise
-spectrum over 30 Hz. F2/F1 peak levels range from -6.92 to -2.63 dB, and
-F3/F1 from -10.63 to -7.01 dB. Actual impulse-response checks at 8, 48, and
-192 kHz measure peak error below 0.003 dB and half-power bandwidth error
-below 0.41%. A separate actual-wave and coefficient regression checks the
-late, fast vowel morph at 400 ms and seven-second utterance lengths across
-these three rates, including its midpoint and endpoint.
-The default voice export places 7.07% of energy below 300 Hz and 58.31% at
-300..1000 Hz; stutters place 8.29% and 60.20% in these bands. These comparisons
-describe spectral balance, not listener transcription accuracy.
+Actual impulse-response checks at 8, 48, and 192 kHz measure peak error below
+0.003 dB and half-power bandwidth error below 0.41%. A separate actual-wave
+and coefficient regression checks the late, fast vowel morph at 400 ms and
+seven-second utterance lengths across these rates, including its midpoint
+and endpoint. The F1-compensation reference voice export places 7.07% of
+energy below 300 Hz and 58.31% at 300..1000 Hz; stutters place 8.29% and
+60.20% in those bands. These describe signal balance, not transcription
+accuracy.
 
 Laser amplitudes use a seeded fixed 3..10 Hz rate per partial, 50% duty, and
 2 ms edge smoothing. Endpoint tests at 8, 48, and 192 kHz measure maximum
@@ -544,3 +543,45 @@ and 32 available UI voices renders in 2.211 seconds (7.369% of realtime wall
 time), with six UI voices observed at block boundaries, no stealing, and no
 suppressed requests. This measures offline throughput; native device playback
 and callback scheduling were not measured for this revision.
+
+
+## Ticker chromatic harmony and audition grid
+
+Dissonance is opt-in through `--dissonance`, `Command::Harmony`, or Scene's
+Diatonic/Dissonant selectors. Its four distinct chromatic pitch classes and
+pedal derive from every normalized ticker ASCII byte using the documented
+fixed integer hash/shuffle. All twelve pitch classes are reachable, with no
+scale quantization. The chord stays fixed across render seeds, market data,
+focus modes, and elapsed time. Chord changes continue through the existing
+pad/pedal crossfade mechanism, including rapid ticker and mode commands.
+
+Harmony is represented by typed diatonic/chromatic variants with validated
+chromatic pitch sets; the clock is explicitly fixed in Dissonant mode.
+Tests reject malformed/duplicate pitch classes, preserve diatonic chord JSON,
+and verify canonical identity for equivalent sets with the same pedal.
+Integration tests verify full-ticker changes even when the old diatonic root
+and new chromatic root collide, exact irregular-block rendering, bounded
+levels at 8/48/192 kHz, and allocation-free mode/symbol commands. The four new
+public dissonance tests and six private harmony tests pass.
+
+The Scene page displays a six-column, four-row grid of 24 tickers. Mouse and
+keyboard selections remain silent UI actions and use the same validated
+symbol command as manual entry. Rejected queue submissions leave selections
+unchanged; reset restores the startup ticker and harmony mode. All 41 CLI/TUI
+tests pass, including visibility/hit targets at 80x24, 100x32, 140x24, and
+160x36. Headless CLI checks also pass. Actual Scene buffers at 80x24 and
+160x36 were captured and inspected for readable ticker names and mode
+controls. Text captures are in `/private/tmp/shzx-sfx-dissonance-audit/`.
+
+A saved pre-feature executable and the new executable rendered the same
+32-second, 48 kHz, seed-123 default-mode timeline with matching mixer
+settings and all four new accent layers muted, switching AAPL to IBM at
+8 seconds and TSLA at 20 seconds. All 1,536,000 stereo frames were bitwise
+identical, with maximum sample difference zero. Default peak/RMS are
+-10.37/-23.10 dBFS. The matching Dissonant export measures
+-10.14/-23.27 dBFS, with 96.64% measured energy below 420 Hz and a
+maximum sample step of 0.00994. Around the two ticker changes, maximum steps
+are 0.00727 and 0.00520. These
+are offline signal checks, not a listening verdict or native device test.
+Both WAVs and their mode-bearing JSONL traces are in
+`/private/tmp/shzx-sfx-dissonance-audit/`.

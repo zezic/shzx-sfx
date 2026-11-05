@@ -133,7 +133,7 @@ const SUB_BANK_CUTOFF: f32 = 400.0;
 
 impl SubBank {
     fn new(chord: Chord, rate: f32, rng: &mut fastrand::Rng) -> Self {
-        let root_hz = midi_hz(chord.root.pedal_note() as f32);
+        let root_hz = midi_hz(chord.pedal_note() as f32);
         Self {
             layers: std::array::from_fn(|i| {
                 let angle = sub_position(i) * std::f32::consts::FRAC_PI_2;
@@ -148,7 +148,7 @@ impl SubBank {
     }
 
     fn tune(&mut self, chord: Chord, rate: f32) {
-        let root_hz = midi_hz(chord.root.pedal_note() as f32);
+        let root_hz = midi_hz(chord.pedal_note() as f32);
         for (index, layer) in self.layers.iter_mut().enumerate() {
             layer
                 .oscillator
@@ -363,7 +363,7 @@ impl Background {
         self.pedals[self.current_pad] = self.pedals[previous];
         self.subs[self.current_pad] = self.subs[previous].clone();
         self.subs[self.current_pad].tune(chord, self.rate);
-        let frequency = midi_hz(chord.root.pedal_note() as f32);
+        let frequency = midi_hz(chord.pedal_note() as f32);
         for (oscillator, hz) in self.pedals[self.current_pad].iter_mut().zip([
             frequency,
             frequency + 0.07,
@@ -465,8 +465,8 @@ impl Background {
     }
 
     pub fn root_transition(&self) -> RootTransition {
-        let to = self.pads[self.current_pad].chord.root;
-        let from = self.pads[1 - self.current_pad].chord.root;
+        let to = self.pads[self.current_pad].chord.root();
+        let from = self.pads[1 - self.current_pad].chord.root();
         if self.transition >= 1.0 || from == to {
             RootTransition::Steady { root: to }
         } else {
@@ -667,7 +667,7 @@ fn delay_parameters(market: MarketContext, focus: f32) -> [EchoParameters; 2] {
 }
 
 fn pedal_oscillators(chord: Chord, rate: f32) -> [Osc; 3] {
-    let frequency = midi_hz(chord.root.pedal_note() as f32);
+    let frequency = midi_hz(chord.pedal_note() as f32);
     [
         Osc::new(frequency, rate, 0.0),
         Osc::new(frequency + 0.07, rate, 0.3),
@@ -828,8 +828,8 @@ mod tests {
             );
         }
         assert_eq!(
-            background.pads[background.current_pad].chord.root,
-            ScaleDegree::VII
+            background.pads[background.current_pad].chord.root(),
+            ScaleDegree::VII.pitch_class()
         );
         assert!(background.transition >= 1.0);
     }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 
-use crate::{Chord, Error, Result, ScaleDegree, SfxLayer};
+use crate::{Chord, Error, HarmonyMode, PitchClass, Result, ScaleDegree, SfxLayer};
 
 /// Validated uppercase ticker stored inline so commands remain allocation-free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
@@ -36,15 +36,18 @@ impl Symbol {
         self.0.as_str()
     }
 
+    /// Diatonic anchor in the default A-natural-minor palette.
     #[must_use]
     pub fn root(self) -> ScaleDegree {
-        let hash = self
-            .0
+        ScaleDegree::ALL[(self.ascii_hash() % ScaleDegree::ALL.len() as u64) as usize]
+    }
+
+    pub(crate) fn ascii_hash(self) -> u64 {
+        self.0
             .bytes()
             .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-            });
-        ScaleDegree::ALL[(hash % ScaleDegree::ALL.len() as u64) as usize]
+            })
     }
 }
 
@@ -398,12 +401,13 @@ pub struct ParameterSnapshot {
     pub target: f32,
 }
 
-/// The next musical decision is either scheduled or inhibited by focus.
+/// An autonomous decision can be scheduled, held, or fixed by its current mode.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum ClockState {
     Scheduled { in_seconds: f32 },
     Held { recheck_in_seconds: f32 },
+    Fixed,
 }
 
 impl ClockState {
@@ -438,7 +442,8 @@ pub enum ChordTransition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct HarmonySnapshot {
-    pub root: ScaleDegree,
+    pub mode: HarmonyMode,
+    pub root: PitchClass,
     pub root_transition: RootTransition,
     pub transition: ChordTransition,
     /// Predicted from the current smoothed market controls. Further smoothing
@@ -451,11 +456,11 @@ pub struct HarmonySnapshot {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum RootTransition {
     Steady {
-        root: ScaleDegree,
+        root: PitchClass,
     },
     Crossfading {
-        from: ScaleDegree,
-        to: ScaleDegree,
+        from: PitchClass,
+        to: PitchClass,
         progress: Unit,
         remaining_seconds: f32,
     },
@@ -555,10 +560,10 @@ impl Default for Mix {
             texture: Unit(0.45),
             harmony: Unit(0.55),
             melody: Unit(0.08),
-            demonic_voices: Unit(0.10),
-            demonic_stutters: Unit(0.18),
-            flying_coins: Unit(0.075),
-            laser_beams: Unit(0.05),
+            demonic_voices: Unit(0.0),
+            demonic_stutters: Unit(0.0),
+            flying_coins: Unit(0.0),
+            laser_beams: Unit(0.0),
             ui: Unit(0.40),
             transmission: Unit(0.22),
             reverb: Unit(0.5),
@@ -1310,6 +1315,7 @@ pub struct GeneratedEvent {
 )]
 pub enum Command {
     Symbol(Symbol),
+    Harmony(HarmonyMode),
     Market(MarketContext),
     Mode(Mode),
     Mix(Mix),
@@ -1471,6 +1477,7 @@ pub struct TransmissionSnapshot {
 #[derive(Clone, Copy, Debug)]
 pub struct RenderConfig {
     pub symbol: Symbol,
+    pub harmony_mode: HarmonyMode,
     pub sample_rate: u32,
     pub seed: u64,
     pub max_voices: usize,
@@ -1483,6 +1490,7 @@ impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             symbol: Symbol::default(),
+            harmony_mode: HarmonyMode::default(),
             sample_rate: 48_000,
             seed: 0x5348_495a_4558,
             max_voices: 32,

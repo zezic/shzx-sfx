@@ -8,7 +8,7 @@ use ratatui::{
 };
 use shzx_sfx::{
     AmbientSnapshot, AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState,
-    DelaySnapshot, GLOBAL_SCALE, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer,
+    DelaySnapshot, HarmonyMode, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer,
     SfxLayerRecipe, SfxLayerSelection, SfxLayerState, SfxLayerStereo, SfxModulation, SfxRecipe,
     Snapshot, SpatialMode, Trend, Unit,
 };
@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 
 use super::{
     App, Control, EditorPage, MarketField, Overlay, Preset, ReverbBus, ReverbField, SfxParameter,
-    Tab, TonalParameter,
+    Tab, TonalParameter, ticker_choices,
 };
 use crate::MixLayer;
 
@@ -251,7 +251,8 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     if let Some(snapshot) = app.snapshot {
         frame.render_widget(
             Paragraph::new(format!(
-                " {GLOBAL_SCALE} | {} | gain {:+.0}dB | v{}/{} | P{} R{} dBFS",
+                " {} | {} | gain {:+.0}dB | v{}/{} | P{} R{} dBFS",
+                snapshot.background.harmony.mode.label(),
                 root_text(&snapshot),
                 snapshot.output_gain_db,
                 snapshot.active_voices,
@@ -267,10 +268,15 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
 
 fn root_text(snapshot: &Snapshot) -> String {
     match snapshot.background.harmony.root_transition {
-        RootTransition::Steady { root } => format!("root {root}"),
+        RootTransition::Steady { root } => format!("root {}", root.note_name()),
         RootTransition::Crossfading {
             from, to, progress, ..
-        } => format!("root {from}>{to} {:.0}%", progress.get() * 100.0),
+        } => format!(
+            "root {}>{} {:.0}%",
+            from.note_name(),
+            to.note_name(),
+            progress.get() * 100.0
+        ),
     }
 }
 
@@ -316,18 +322,20 @@ fn button(
     let style = Style::default()
         .fg(if selected { AMBER } else { TEXT })
         .bg(if focus { FOCUSED } else { PANEL });
-    frame.render_widget(
-        Paragraph::new(label.to_owned())
-            .alignment(Alignment::Center)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_set(ASCII_BORDER)
-                    .border_style(border_style),
-            )
-            .style(style),
-        rectangle,
-    );
+    let paragraph = Paragraph::new(label.to_owned())
+        .alignment(Alignment::Center)
+        .style(style);
+    let paragraph = if rectangle.height >= 3 {
+        paragraph.block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_set(ASCII_BORDER)
+                .border_style(border_style),
+        )
+    } else {
+        paragraph
+    };
+    frame.render_widget(paragraph, rectangle);
     hits.add(rectangle, control);
 }
 
@@ -345,11 +353,10 @@ fn buttons<const N: usize>(area: Rect) -> [Rect; N] {
 }
 
 fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
-    let inner = panel(frame, area, " SCENE / Mode, market presets, spatial sound ");
-    let row_step = if inner.height < 11 { 3 } else { 4 };
+    let inner = panel(frame, area, " SCENE / Modes, market, harmony, and ticker ");
     for (mode, rectangle) in [Mode::Browse, Mode::Dialog, Mode::Focus]
         .into_iter()
-        .zip(buttons::<3>(Rect::new(inner.x, inner.y, inner.width, 3)))
+        .zip(buttons::<3>(Rect::new(inner.x, inner.y, inner.width, 1)))
     {
         button(
             frame,
@@ -367,9 +374,9 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     }
     for (preset, rectangle) in Preset::ALL.into_iter().zip(buttons::<5>(Rect::new(
         inner.x,
-        inner.y + row_step,
+        inner.y + 1,
         inner.width,
-        3,
+        1,
     ))) {
         button(
             frame,
@@ -381,17 +388,17 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             hits,
         );
     }
-    let bottom = buttons::<5>(Rect::new(inner.x, inner.y + row_step * 2, inner.width, 3));
-    for (index, (spatial, label)) in [
+    let controls = buttons::<5>(Rect::new(inner.x, inner.y + 2, inner.width, 1));
+    for ((spatial, label), rectangle) in [
         (SpatialMode::Pan, "Pan only"),
         (SpatialMode::Haas, "Haas spatial"),
     ]
     .into_iter()
-    .enumerate()
+    .zip(controls)
     {
         button(
             frame,
-            bottom[index],
+            rectangle,
             label,
             Control::SetSpatial(spatial),
             app.spatial == spatial,
@@ -399,7 +406,7 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             hits,
         );
     }
-    for (rectangle, (kind, label)) in bottom.into_iter().skip(2).zip([
+    for (rectangle, (kind, label)) in controls.into_iter().skip(2).zip([
         (SfxKind::OrderCreate, "Order create"),
         (SfxKind::OrderFill, "Order fill"),
         (SfxKind::Error, "Error"),
@@ -414,8 +421,49 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             hits,
         );
     }
-    if inner.height > 12 {
-        frame.render_widget(Paragraph::new("Presets shape the visible market; mode changes only the background character.\nHarmony evolves slowly. UI effects stay direct when a dialog is open.").style(Style::default().fg(DIM)), Rect::new(inner.x + 1, inner.y + 12, inner.width - 2, inner.height - 12));
+    for ((mode, label), rectangle) in [
+        (HarmonyMode::Diatonic, "Diatonic / A minor"),
+        (HarmonyMode::Dissonant, "Dissonant / ticker"),
+    ]
+    .into_iter()
+    .zip(buttons::<2>(Rect::new(
+        inner.x,
+        inner.y + 3,
+        inner.width,
+        1,
+    ))) {
+        button(
+            frame,
+            rectangle,
+            label,
+            Control::SetHarmony(mode),
+            app.harmony_mode == mode,
+            app,
+            hits,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Ticker grid / click or Enter selects / T enters another symbol")
+            .style(Style::default().fg(DIM)),
+        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+    );
+    let columns = buttons::<6>(inner);
+    for (index, symbol) in ticker_choices().enumerate() {
+        let column = columns[index % columns.len()];
+        button(
+            frame,
+            Rect::new(
+                column.x,
+                inner.y + 5 + (index / columns.len()) as u16,
+                column.width,
+                1,
+            ),
+            symbol.as_str(),
+            Control::PickSymbol(symbol),
+            app.symbol == symbol,
+            app,
+            hits,
+        );
     }
 }
 
@@ -1261,7 +1309,22 @@ fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 
     if inner.height > 12 {
-        frame.render_widget(Paragraph::new("NOW is the smoothed state used by the audio callback. TARGET is its latest accepted input.\nThe next chord is a preview: new market inputs can change it before the clock is due.\nDialog and Focus hold harmony selection and melodic entrances while their clocks keep running.").style(Style::default().fg(DIM)).wrap(Wrap { trim: true }), Rect::new(inner.x, inner.y + 12, inner.width, inner.height - 12));
+        let harmony_help = match background.harmony.mode {
+            HarmonyMode::Diatonic => {
+                "The next chord is a preview: new market inputs can change it before the clock is due.\nDialog and Focus hold harmony selection and melodic entrances while their clocks keep running."
+            }
+            HarmonyMode::Dissonant => {
+                "Dissonant harmony is fixed by the ticker. Market, Dialog, and Focus reshape the texture without changing its notes.\nFocus can still hold melodic entrances."
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "NOW is the smoothed state used by the audio callback. TARGET is its latest accepted input.\n{harmony_help}"
+            ))
+            .style(Style::default().fg(DIM))
+            .wrap(Wrap { trim: true }),
+            Rect::new(inner.x, inner.y + 12, inner.width, inner.height - 12),
+        );
     }
 }
 
@@ -1375,7 +1438,11 @@ fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let background = snapshot.background;
     let mut lines = vec![
         Line::styled(
-            format!("{GLOBAL_SCALE} | {}", root_text(&snapshot)),
+            format!(
+                "{} | {}",
+                snapshot.background.harmony.mode.label(),
+                root_text(&snapshot)
+            ),
             Style::default().fg(DIM),
         ),
         Line::raw(format!(
@@ -1566,6 +1633,7 @@ fn voice_short(value: BackgroundVoice) -> String {
 
 fn clock_short(value: ClockState) -> String {
     match value {
+        ClockState::Fixed => "fixed".into(),
         ClockState::Scheduled { in_seconds } => format!("due {in_seconds:.1}s"),
         ClockState::Held { recheck_in_seconds } => format!("HELD {recheck_in_seconds:.1}s"),
     }
@@ -1594,6 +1662,7 @@ fn hz(value: f32) -> String {
 
 fn clock(value: ClockState) -> String {
     match value {
+        ClockState::Fixed => "fixed".into(),
         ClockState::Scheduled { in_seconds } => format!("due {in_seconds:.2}s"),
         ClockState::Held { recheck_in_seconds } => {
             format!("HELD / recheck {recheck_in_seconds:.2}s")
@@ -1751,7 +1820,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
             Line::raw("1-7  Scene / Market / Mixer / SFX / Monitor / Reverb / Inspect"),
-            Line::raw("T or Symbol button  Select a stock within the shared scale"),
+            Line::raw("Scene ticker grid or T / Symbol button selects a ticker."),
             Line::raw("Tab / Shift-Tab Move focus between controls"),
             Line::raw("Up / Down       Move focus; browse sounds in the SFX list"),
             Line::raw("Left / Right    Adjust a focused value"),
@@ -1793,7 +1862,7 @@ fn symbol_entry(frame: &mut Frame<'_>, area: Rect, app: &App) -> HitMap {
         height,
     );
     frame.render_widget(Clear, rectangle);
-    let inner = panel(frame, rectangle, " SYMBOL / Shared harmonic palette ");
+    let inner = panel(frame, rectangle, " SYMBOL / Ticker harmony ");
     let mut hits = HitMap::default();
     if inner.is_empty() {
         return hits;
@@ -1807,8 +1876,12 @@ fn symbol_entry(frame: &mut Frame<'_>, area: Rect, app: &App) -> HitMap {
     );
     if inner.height >= 9 {
         frame.render_widget(
-            Paragraph::new(format!("Current: {} | {GLOBAL_SCALE}", app.symbol))
-                .style(Style::default().fg(DIM)),
+            Paragraph::new(format!(
+                "Current: {} | {}",
+                app.symbol,
+                app.harmony_mode.label()
+            ))
+            .style(Style::default().fg(DIM)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         frame.render_widget(
@@ -2032,7 +2105,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use shzx_sfx::{
-        Chord, ChordShape, MarketContext, OutputInfo, RenderConfig, Renderer, ScaleDegree,
+        Chord, ChordShape, Command, MarketContext, OutputInfo, RenderConfig, Renderer, ScaleDegree,
     };
 
     fn app() -> App {
@@ -2727,7 +2800,7 @@ mod tests {
                 "NVDA_",
                 "Apply / Enter",
                 "Cancel / Esc",
-                GLOBAL_SCALE,
+                HarmonyMode::Diatonic.label(),
                 "Invalid symbols",
             ] {
                 assert!(
@@ -2736,5 +2809,88 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn scene_ticker_grid_shows_all_choices_and_routes_each_mouse_target() {
+        let mut app = app();
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(ticker_choices().count(), 24);
+            for symbol in ticker_choices() {
+                let control = Control::PickSymbol(symbol);
+                let target = hits.region(control).expect("ticker has a mouse target");
+                assert!(target.right() <= width && target.bottom() <= height);
+                assert_eq!(hits.at(target.x, target.y), Some(control));
+                assert!(
+                    text.contains(symbol.as_str()),
+                    "missing {symbol} at {width}x{height}"
+                );
+                let mut sent = Vec::new();
+                app.activate(control, &mut |command| {
+                    sent.push(command);
+                    Ok(())
+                });
+                assert_eq!(sent, [Command::Symbol(symbol)]);
+                assert_eq!(app.symbol, symbol);
+            }
+        }
+    }
+
+    #[test]
+    fn dissonant_monitor_and_symbol_editor_show_the_mode_and_fixed_clock() {
+        let mut app = app();
+        app.harmony_mode = HarmonyMode::Dissonant;
+        app.snapshot = Some(
+            Renderer::new(RenderConfig {
+                harmony_mode: HarmonyMode::Dissonant,
+                ..RenderConfig::default()
+            })
+            .unwrap()
+            .snapshot(),
+        );
+        app.select_tab(Tab::Monitor);
+        let mut terminal = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &app);
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains(HarmonyMode::Dissonant.label()));
+        assert!(text.contains("fixed"));
+        assert!(text.contains("fixed by the ticker"));
+        assert!(!text.contains("The next chord is a preview"));
+        assert!(!text.contains(HarmonyMode::Diatonic.label()));
+        app.activate(Control::Symbol, &mut |_| Ok(()));
+        terminal
+            .draw(|frame| {
+                draw(frame, &app);
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains(HarmonyMode::Dissonant.label()));
     }
 }

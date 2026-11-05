@@ -16,9 +16,9 @@ use ratatui::crossterm::{
     terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
 use shzx_sfx::{
-    AudioEngine, AudioStatus, CallbackStats, Command, DataTransmissionCommand, MarketContext, Mix,
-    Mode, OutputGain, OutputInfo, Pan, RenderConfig, ReverbSettings, SfxEvent, SfxKind, Snapshot,
-    SpatialMode, Symbol, Trend, Unit,
+    AudioEngine, AudioStatus, CallbackStats, Command, DataTransmissionCommand, HarmonyMode,
+    MarketContext, Mix, Mode, OutputGain, OutputInfo, Pan, RenderConfig, ReverbSettings, SfxEvent,
+    SfxKind, Snapshot, SpatialMode, Symbol, Trend, Unit,
 };
 use shzx_sfx::{
     SfxEdits, SfxFilterBand, SfxFmIndex, SfxFmRatio, SfxLayer, SfxLayerSelection, SfxLayerState,
@@ -137,6 +137,16 @@ impl Preset {
     }
 }
 
+fn ticker_choices() -> impl Iterator<Item = Symbol> {
+    [
+        "AAPL", "TSLA", "IBM", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AMD", "INTC", "ORCL",
+        "ADBE", "NFLX", "CRM", "UBER", "SHOP", "COIN", "PLTR", "SOFI", "BRK.B", "^GSPC", "BTC-USD",
+        "ETH-USD", "SPY",
+    ]
+    .into_iter()
+    .map(|value| Symbol::new(value).expect("ticker choices are valid symbols"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Control {
     Inspect,
@@ -151,9 +161,11 @@ enum Control {
     CloseSfxEditor,
     Symbol,
     CommitSymbol,
+    PickSymbol(Symbol),
     CancelSymbol,
     Tab(Tab),
     SetMode(Mode),
+    SetHarmony(HarmonyMode),
     SetTrend(Trend),
     Market(MarketField),
     Mix(MixLayer),
@@ -287,11 +299,13 @@ enum Overlay {
 struct App {
     symbol: Symbol,
     initial_symbol: Symbol,
+    initial_harmony_mode: HarmonyMode,
     symbol_input: String,
     tab: Tab,
     focus: Control,
     market: MarketContext,
     mode: Mode,
+    harmony_mode: HarmonyMode,
     mix: Mix,
     reverb: ReverbSettings,
     spatial: SpatialMode,
@@ -318,11 +332,13 @@ impl App {
         Self {
             symbol: config.symbol,
             initial_symbol: config.symbol,
+            initial_harmony_mode: config.harmony_mode,
             symbol_input: String::new(),
             tab: Tab::Scene,
             focus: Control::SetMode(Mode::Browse),
             market: MarketContext::default(),
             mode: Mode::Browse,
+            harmony_mode: config.harmony_mode,
             mix: config.mix,
             reverb: config.reverb,
             spatial: config.spatial,
@@ -356,6 +372,7 @@ impl App {
                 match command {
                     Command::Market(market) => self.market = market,
                     Command::Mode(mode) => self.mode = mode,
+                    Command::Harmony(mode) => self.harmony_mode = mode,
                     Command::Mix(mix) => self.mix = mix,
                     Command::Symbol(symbol) => self.symbol = symbol,
                     Command::Reverb(reverb) => self.reverb = reverb,
@@ -377,13 +394,21 @@ impl App {
                     Command::Mode(mode) => {
                         format!("Scene: {mode}. Environment transitions smoothly.")
                     }
-                    Command::Market(_) => {
-                        "Visible market updated. Harmony follows its musical clock.".into()
-                    }
+                    Command::Market(_) => match self.harmony_mode {
+                        HarmonyMode::Diatonic => {
+                            "Visible market updated. Harmony follows its musical clock.".into()
+                        }
+                        HarmonyMode::Dissonant => {
+                            "Visible market updated. Ticker harmony stays fixed.".into()
+                        }
+                    },
                     Command::Mix(_) => "Layer levels updated.".into(),
-                    Command::Symbol(symbol) => format!(
-                        "Symbol {symbol}: harmonic base crossfades within the shared scale."
-                    ),
+                    Command::Symbol(symbol) => {
+                        format!("Symbol {symbol}: {} harmony selected.", self.harmony_mode)
+                    }
+                    Command::Harmony(mode) => {
+                        format!("Harmony: {mode}. The chord changes smoothly.")
+                    }
                     Command::Reverb(_) => {
                         "Reverb updated. The existing tail continues through the transition.".into()
                     }
@@ -423,6 +448,8 @@ impl App {
                 .chain(
                     [SfxKind::OrderCreate, SfxKind::OrderFill, SfxKind::Error].map(Control::Fire),
                 )
+                .chain([HarmonyMode::Diatonic, HarmonyMode::Dissonant].map(Control::SetHarmony))
+                .chain(ticker_choices().map(Control::PickSymbol))
                 .collect(),
             Tab::Market => [Trend::Bearish, Trend::Sideways, Trend::Bullish]
                 .map(Control::SetTrend)
@@ -590,9 +617,15 @@ impl App {
                 Err(error) => self.notice = error.to_string(),
             },
             Control::CancelSymbol => self.overlay = Overlay::None,
+            Control::PickSymbol(symbol) => {
+                self.submit(Command::Symbol(symbol), send);
+            }
             Control::Tab(tab) => self.select_tab(tab),
             Control::SetMode(mode) => {
                 self.submit(Command::Mode(mode), send);
+            }
+            Control::SetHarmony(mode) => {
+                self.submit(Command::Harmony(mode), send);
             }
             Control::SetTrend(trend) => {
                 self.submit(
@@ -648,6 +681,7 @@ impl App {
                     Command::Spatial(self.initial_spatial),
                     Command::Reverb(self.initial_reverb),
                     Command::Symbol(self.initial_symbol),
+                    Command::Harmony(self.initial_harmony_mode),
                 ] {
                     if !self.submit(command, send) {
                         return false;

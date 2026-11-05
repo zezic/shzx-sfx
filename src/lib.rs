@@ -18,7 +18,10 @@ mod sfx_eq;
 mod transmission;
 
 pub use error::{Error, Result};
-pub use harmony::{Chord, ChordShape, GLOBAL_SCALE, ScaleDegree};
+pub use harmony::{
+    Chord, ChordShape, ChromaticVoicing, DiatonicChord, GLOBAL_SCALE, HarmonyMode, PitchClass,
+    ScaleDegree,
+};
 pub use model::*;
 #[cfg(feature = "playback")]
 pub use playback::*;

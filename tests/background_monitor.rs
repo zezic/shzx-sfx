@@ -26,7 +26,7 @@ fn advance(renderer: &mut Renderer, mut frames: usize) {
 fn scheduled_seconds(clock: ClockState) -> f32 {
     match clock {
         ClockState::Scheduled { in_seconds } => in_seconds,
-        ClockState::Held { .. } => panic!("expected an active musical clock"),
+        ClockState::Held { .. } | ClockState::Fixed => panic!("expected an active musical clock"),
     }
 }
 
