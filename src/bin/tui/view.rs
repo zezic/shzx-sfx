@@ -442,10 +442,24 @@ fn scene(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             hits,
         );
     }
+    let navigation = Rect::new(inner.right() - 24, inner.y + 4, 24, 1);
     frame.render_widget(
-        Paragraph::new("Ticker grid / click or Enter selects / T enters another symbol")
-            .style(Style::default().fg(DIM)),
-        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+        Paragraph::new("Ticker grid / click, Enter, or T").style(Style::default().fg(DIM)),
+        Rect::new(inner.x, navigation.y, inner.width - navigation.width - 1, 1),
+    );
+    let remaining = app.ticker_navigation.remaining();
+    let label = match remaining {
+        Some(remaining) => format!("Auto ON / {}s", remaining.as_secs_f64().ceil() as u64),
+        None => "Auto OFF".into(),
+    };
+    button(
+        frame,
+        navigation,
+        &label,
+        Control::ToggleTickerNavigation,
+        remaining.is_some(),
+        app,
+        hits,
     );
     let columns = buttons::<6>(inner);
     for (index, symbol) in ticker_choices().enumerate() {
@@ -1829,7 +1843,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
             Line::raw("1-7  Scene / Market / Mixer / SFX / Monitor / Reverb / Inspect"),
-            Line::raw("Scene ticker grid or T / Symbol button selects a ticker."),
+            Line::raw("Scene: auto tickers default ON; random 25..180s; toggle by grid."),
             Line::raw("Tab / Shift-Tab Move focus between controls"),
             Line::raw("Up / Down       Move focus; browse sounds in the SFX list"),
             Line::raw("Left / Right    Adjust a focused value"),
@@ -2900,6 +2914,61 @@ mod tests {
                 assert_eq!(sent, [Command::Symbol(symbol)]);
                 assert_eq!(app.symbol, symbol);
             }
+        }
+    }
+
+    #[test]
+    fn ticker_navigation_toggle_and_countdown_share_the_grid_heading_at_all_sizes() {
+        for (width, height) in [(80, 24), (100, 32), (140, 24), (160, 36)] {
+            let mut app = app();
+            let initial = app.ticker_navigation.remaining().unwrap();
+            app.advance(std::time::Duration::from_secs(1), &mut |_| {
+                panic!("the first ticker interval is at least 25 seconds")
+            });
+            assert_eq!(
+                app.ticker_navigation.remaining(),
+                Some(initial - std::time::Duration::from_secs(1))
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for enabled in [true, false, true] {
+                let remaining = app.ticker_navigation.remaining();
+                assert_eq!(remaining.is_some(), enabled);
+                let expected = match remaining {
+                    Some(remaining) => {
+                        format!("Auto ON / {}s", remaining.as_secs_f64().ceil() as u64)
+                    }
+                    None => "Auto OFF".into(),
+                };
+                let mut hits = HitMap::default();
+                terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
+                let control = Control::ToggleTickerNavigation;
+                let target = hits.region(control).expect("auto ticker toggle is visible");
+                assert_eq!(target.width, 24);
+                assert!(target.right() <= width && target.bottom() <= height);
+                assert_eq!(hits.at(target.x, target.y), Some(control));
+                assert!(app.focus_order().contains(&control));
+                let first_ticker = hits
+                    .region(Control::PickSymbol(ticker_choices().next().unwrap()))
+                    .unwrap();
+                assert_eq!(target.y + 1, first_ticker.y);
+                let row = (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, target.y)].symbol())
+                    .collect::<String>();
+                assert!(row.contains("Ticker grid / click, Enter, or T"));
+                assert!(row.contains(&expected), "{width}x{height}: {row}");
+                app.activate(control, &mut |_| panic!("toggling navigation is local"));
+            }
+            app.overlay = Overlay::Help;
+            terminal
+                .draw(|frame| {
+                    draw(frame, &app);
+                })
+                .unwrap();
+            let text = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|position| terminal.backend().buffer()[position].symbol())
+                .collect::<String>();
+            assert!(text.contains("auto tickers default ON; random 25..180s"));
         }
     }
 

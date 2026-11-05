@@ -148,6 +148,71 @@ fn ticker_choices() -> impl Iterator<Item = Symbol> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScheduledTicker {
+    at: Duration,
+    symbol: Symbol,
+}
+
+struct TickerNavigation {
+    rng: fastrand::Rng,
+    elapsed: Duration,
+    next: Option<ScheduledTicker>,
+}
+
+impl TickerNavigation {
+    fn new(seed: u64, symbol: Symbol) -> Self {
+        let mut navigation = Self {
+            rng: fastrand::Rng::with_seed(seed ^ 0x5449_434b_4552),
+            elapsed: Duration::ZERO,
+            next: None,
+        };
+        navigation.enable(symbol);
+        navigation
+    }
+
+    fn schedule(&mut self, current: Symbol) {
+        let candidates = || ticker_choices().filter(|symbol| *symbol != current);
+        let index = self.rng.usize(..candidates().count());
+        self.next = Some(ScheduledTicker {
+            at: self.elapsed + Duration::from_millis(self.rng.u64(25_000..=180_000)),
+            symbol: candidates()
+                .nth(index)
+                .expect("random ticker index is within the grid"),
+        });
+    }
+
+    fn enable(&mut self, current: Symbol) {
+        if self.next.is_none() {
+            self.schedule(current);
+        }
+    }
+
+    fn toggle(&mut self, current: Symbol) {
+        if self.next.is_some() {
+            self.next = None;
+        } else {
+            self.enable(current);
+        }
+    }
+
+    fn symbol_changed(&mut self, current: Symbol) {
+        if self.next.is_some() {
+            self.schedule(current);
+        }
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        self.next.map(|next| next.at.saturating_sub(self.elapsed))
+    }
+
+    fn due(&self) -> Option<Symbol> {
+        self.next
+            .filter(|next| next.at <= self.elapsed)
+            .map(|next| next.symbol)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Control {
     Inspect,
     AuditionLayer(SfxLayer),
@@ -162,6 +227,7 @@ enum Control {
     Symbol,
     CommitSymbol,
     PickSymbol(Symbol),
+    ToggleTickerNavigation,
     CancelSymbol,
     Tab(Tab),
     SetMode(Mode),
@@ -298,6 +364,7 @@ enum Overlay {
 
 struct App {
     symbol: Symbol,
+    ticker_navigation: TickerNavigation,
     initial_symbol: Symbol,
     initial_harmony_mode: HarmonyMode,
     symbol_input: String,
@@ -331,6 +398,7 @@ impl App {
     fn new(config: RenderConfig, output: OutputInfo) -> Self {
         Self {
             symbol: config.symbol,
+            ticker_navigation: TickerNavigation::new(config.seed, config.symbol),
             initial_symbol: config.symbol,
             initial_harmony_mode: config.harmony_mode,
             symbol_input: String::new(),
@@ -374,7 +442,10 @@ impl App {
                     Command::Mode(mode) => self.mode = mode,
                     Command::Harmony(mode) => self.harmony_mode = mode,
                     Command::Mix(mix) => self.mix = mix,
-                    Command::Symbol(symbol) => self.symbol = symbol,
+                    Command::Symbol(symbol) => {
+                        self.symbol = symbol;
+                        self.ticker_navigation.symbol_changed(symbol);
+                    }
                     Command::Reverb(reverb) => self.reverb = reverb,
                     Command::Spatial(spatial) => self.spatial = spatial,
                     Command::Trigger(event) => self.effect = event.kind,
@@ -424,6 +495,19 @@ impl App {
         }
     }
 
+    fn advance(
+        &mut self,
+        elapsed: Duration,
+        send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
+    ) {
+        self.ticker_navigation.elapsed = elapsed;
+        if self.overlay != Overlay::SymbolEntry
+            && let Some(symbol) = self.ticker_navigation.due()
+        {
+            self.submit(Command::Symbol(symbol), send);
+        }
+    }
+
     fn select_tab(&mut self, tab: Tab) {
         self.tab = tab;
         self.focus = self.focus_order()[0];
@@ -449,6 +533,7 @@ impl App {
                     [SfxKind::OrderCreate, SfxKind::OrderFill, SfxKind::Error].map(Control::Fire),
                 )
                 .chain([HarmonyMode::Diatonic, HarmonyMode::Dissonant].map(Control::SetHarmony))
+                .chain([Control::ToggleTickerNavigation])
                 .chain(ticker_choices().map(Control::PickSymbol))
                 .collect(),
             Tab::Market => [Trend::Bearish, Trend::Sideways, Trend::Bullish]
@@ -620,6 +705,15 @@ impl App {
             Control::PickSymbol(symbol) => {
                 self.submit(Command::Symbol(symbol), send);
             }
+            Control::ToggleTickerNavigation => {
+                self.ticker_navigation.toggle(self.symbol);
+                self.notice = if self.ticker_navigation.remaining().is_some() {
+                    "Automatic tickers enabled. Changes are 25 to 180 seconds apart."
+                } else {
+                    "Automatic tickers paused. Select a ticker from the grid or enter one."
+                }
+                .into();
+            }
             Control::Tab(tab) => self.select_tab(tab),
             Control::SetMode(mode) => {
                 self.submit(Command::Mode(mode), send);
@@ -691,6 +785,7 @@ impl App {
                 self.effect_edits.clear();
                 self.event_pan = Pan::CENTER;
                 self.event_intensity = Unit::new(0.6).expect("constant intensity is normalized");
+                self.ticker_navigation.enable(self.symbol);
                 self.notice =
                     "Controls reset to startup values. Audio tails continue naturally.".into();
             }
@@ -1396,6 +1491,7 @@ fn control_panel(
             {
                 app.notice = format!("Transmission demo pending: {error}");
             }
+            app.advance(started.elapsed(), &mut send);
             terminal.draw(|frame| {
                 hits = view::draw(frame, &app);
             })?;

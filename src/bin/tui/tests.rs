@@ -905,6 +905,124 @@ fn tonal_rate_endpoint_edits_preserve_the_other_endpoint_and_reset_to_the_palett
 }
 
 #[test]
+fn automatic_tickers_reproduce_and_switch_once_per_random_deadline() {
+    let mut first = app();
+    let mut second = app();
+    let mut previous = Duration::ZERO;
+    let mut symbols = std::collections::HashSet::new();
+    let mut intervals = std::collections::BTreeSet::new();
+    for _ in 0..128 {
+        let next = first.ticker_navigation.next.expect("enabled by default");
+        assert_eq!(second.ticker_navigation.next, Some(next));
+        let interval = next.at - previous;
+        assert!((Duration::from_secs(25)..=Duration::from_secs(180)).contains(&interval));
+        assert_ne!(next.symbol, first.symbol);
+        assert!(ticker_choices().any(|symbol| symbol == next.symbol));
+        for app in [&mut first, &mut second] {
+            let mut sent = Vec::new();
+            app.advance(next.at - Duration::from_nanos(1), &mut |command| {
+                sent.push(command);
+                Ok(())
+            });
+            assert!(sent.is_empty());
+            app.advance(next.at, &mut |command| {
+                sent.push(command);
+                Ok(())
+            });
+            app.advance(next.at, &mut |command| {
+                sent.push(command);
+                Ok(())
+            });
+            assert_eq!(sent, [Command::Symbol(next.symbol)]);
+            assert_eq!(app.symbol, next.symbol);
+        }
+        symbols.insert(next.symbol);
+        intervals.insert(interval);
+        previous = next.at;
+    }
+    assert!(symbols.len() > 1 && intervals.len() > 1);
+}
+
+#[test]
+fn automatic_tickers_retry_pending_choices_and_reschedule_accepted_manual_selections() {
+    let mut app = app();
+    let initial = app.symbol;
+    let pending = app.ticker_navigation.next.unwrap();
+    app.advance(pending.at, &mut |_| Err(shzx_sfx::Error::QueueFull));
+    assert_eq!(app.symbol, initial);
+    assert_eq!(app.ticker_navigation.next, Some(pending));
+    let retry = pending.at + Duration::from_secs(1);
+    let mut sent = Vec::new();
+    app.advance(retry, &mut |command| {
+        sent.push(command);
+        Ok(())
+    });
+    assert_eq!(sent, [Command::Symbol(pending.symbol)]);
+    let next = app.ticker_navigation.next.unwrap();
+    assert!((Duration::from_secs(25)..=Duration::from_secs(180)).contains(&(next.at - retry)));
+
+    let manual = ticker_choices()
+        .find(|symbol| *symbol != app.symbol)
+        .unwrap();
+    app.activate(Control::PickSymbol(manual), &mut |_| {
+        Err(shzx_sfx::Error::QueueFull)
+    });
+    assert_eq!(app.symbol, pending.symbol);
+    assert_eq!(app.ticker_navigation.next, Some(next));
+    app.activate(Control::PickSymbol(manual), &mut |_| Ok(()));
+    assert_eq!(app.symbol, manual);
+    assert_ne!(app.ticker_navigation.next, Some(next));
+
+    app.activate(Control::Symbol, &mut |_| Ok(()));
+    app.symbol_input = "QQQ".into();
+    let overdue = app.ticker_navigation.next.unwrap().at + Duration::from_secs(10);
+    app.advance(overdue, &mut |_| {
+        panic!("ticker entry defers automatic changes")
+    });
+    assert_eq!(app.symbol, manual);
+    assert_eq!(app.symbol_input, "QQQ");
+    app.activate(Control::CommitSymbol, &mut |_| Ok(()));
+    assert_eq!(app.symbol.as_str(), "QQQ");
+    assert_eq!(app.overlay, Overlay::None);
+    let next = app.ticker_navigation.next.unwrap();
+    assert!((Duration::from_secs(25)..=Duration::from_secs(180)).contains(&(next.at - overdue)));
+    assert_ne!(next.symbol, app.symbol);
+}
+
+#[test]
+fn automatic_ticker_toggle_reset_and_host_suspension_keep_a_single_live_schedule() {
+    let mut app = app();
+    app.focus = Control::ToggleTickerNavigation;
+    app.key(key(KeyCode::Enter, KeyEventKind::Press), &mut |_| {
+        panic!("toggling navigation sends no audio command")
+    });
+    assert_eq!(app.ticker_navigation.remaining(), None);
+    let resumed = Duration::from_secs(36_000);
+    app.advance(resumed, &mut |_| panic!("disabled navigation stays silent"));
+    app.click(Control::ToggleTickerNavigation, &mut |_| {
+        panic!("toggling navigation sends no audio command")
+    });
+    assert!(
+        (Duration::from_secs(25)..=Duration::from_secs(180))
+            .contains(&app.ticker_navigation.remaining().unwrap())
+    );
+    app.activate(Control::ToggleTickerNavigation, &mut |_| Ok(()));
+    app.activate(Control::Reset, &mut |_| Err(shzx_sfx::Error::QueueFull));
+    assert_eq!(app.ticker_navigation.remaining(), None);
+    app.activate(Control::Reset, &mut |_| Ok(()));
+    assert!(app.ticker_navigation.remaining().is_some());
+    let later = resumed + Duration::from_secs(3_600);
+    let mut sent = Vec::new();
+    app.advance(later, &mut |command| {
+        sent.push(command);
+        Ok(())
+    });
+    assert!(matches!(sent.as_slice(), [Command::Symbol(_)]));
+    let next = app.ticker_navigation.next.unwrap();
+    assert!((Duration::from_secs(25)..=Duration::from_secs(180)).contains(&(next.at - later)));
+}
+
+#[test]
 fn ticker_grid_sends_only_symbol_commands_and_keeps_rejected_selections_unchanged() {
     let mut app = app();
     let choices: Vec<_> = ticker_choices().collect();

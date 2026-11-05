@@ -575,7 +575,7 @@ public dissonance tests and six private harmony tests pass.
 The Scene page displays a six-column, four-row grid of 24 tickers. Mouse and
 keyboard selections remain silent UI actions and use the same validated
 symbol command as manual entry. Rejected queue submissions leave selections
-unchanged; reset restores the startup ticker and harmony mode. All 43 CLI/TUI
+unchanged; reset restores the startup ticker and harmony mode. All 47 CLI/TUI
 tests pass, including visibility/hit targets at 80x24, 100x32, 140x24, and
 160x36. Headless CLI checks also pass. Actual Scene buffers at 80x24 and
 160x36 were captured and inspected for readable ticker names and mode
@@ -596,6 +596,18 @@ unity. Output trim retains its independent dB scale. Tests exercise keyboard
 and fine steps, endpoint clicks, midpoint dragging, reset, command values,
 bar positions, and gain readouts at 80x24, 140x24, and 280x36. All use the
 existing numeric-control path without separate stored fader positions.
+
+Automatic TUI ticker navigation starts enabled. Its seeded host-clock schedule
+chooses a different grid ticker and a fresh 25..180 second interval after each
+accepted selection. Manual selections restart the wait, queue rejection retains
+the pending target, and a late host update submits at most one change. Symbol
+entry defers automatic changes. The Scene toggle pauses or resumes navigation,
+and successful reset restores the default enabled state. Deterministic tests
+cover 128 deadlines, grid membership, seed reproducibility, queue retries,
+manual selection, editor deferral, toggle/reset, and host suspension. The toggle
+and countdown fit the existing grid heading at 80x24 through 160x36. All 47
+CLI/TUI tests pass; the renderer and audio callback receive the existing typed
+symbol command without a separate navigation channel.
 
 
 ## Reference-calibrated demonic voices
