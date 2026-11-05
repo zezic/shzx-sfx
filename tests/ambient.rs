@@ -49,6 +49,7 @@ fn silent_mix() -> Mix {
         demonic_stutters: Unit::ZERO,
         flying_coins: Unit::ZERO,
         laser_beams: Unit::ZERO,
+        rain: Unit::ZERO,
         ui: Unit::ZERO,
         transmission: Unit::ZERO,
         reverb: Unit::ZERO,

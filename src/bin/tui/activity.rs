@@ -1,6 +1,20 @@
 use std::{collections::VecDeque, time::Duration};
 
-use shzx_sfx::{Pan, SfxEvent, SfxKind, Unit};
+use shzx_sfx::{Mode, Pan, SfxKind, Unit};
+
+use super::Preset;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Action {
+    Trigger {
+        kind: SfxKind,
+        pan: Pan,
+        intensity: Unit,
+    },
+    Mode(Mode),
+    Market(Preset),
+    Zoom(Unit),
+}
 
 /// A virtual trading terminal, independent of the sound lab's controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,7 +239,7 @@ impl Workflow {
 }
 
 struct Gesture {
-    event: SfxEvent,
+    action: Action,
     after: Duration,
 }
 
@@ -234,9 +248,12 @@ struct Simulation {
     events: VecDeque<Gesture>,
     next_at: Duration,
     next_order_at: Duration,
+    next_market_at: Duration,
     order_outcome: OrderOutcome,
     routines: [Routine; Routine::ALL.len()],
     routine_index: usize,
+    markets: [Preset; 4],
+    market_index: usize,
     cursor: Position,
     hovered: Option<Region>,
 }
@@ -245,11 +262,19 @@ impl Simulation {
     fn new(elapsed: Duration, rng: &mut fastrand::Rng) -> Self {
         let mut routines = Routine::ALL;
         rng.shuffle(&mut routines);
+        let mut markets = [
+            Preset::Idle,
+            Preset::Bullish,
+            Preset::Bearish,
+            Preset::Volatile,
+        ];
+        rng.shuffle(&mut markets);
         Self {
             workflow: Workflow::Routine(routines[0]),
             events: VecDeque::new(),
             next_at: elapsed + Duration::from_millis(rng.u64(500..=1_500)),
             next_order_at: elapsed + Duration::from_secs(rng.u64(45..=75)),
+            next_market_at: elapsed + Duration::from_secs(rng.u64(25..=60)),
             order_outcome: if rng.bool() {
                 OrderOutcome::Fill
             } else {
@@ -257,6 +282,8 @@ impl Simulation {
             },
             routines,
             routine_index: 0,
+            markets,
+            market_index: 0,
             cursor: Region::Chart.position(rng),
             hovered: None,
         }
@@ -276,15 +303,23 @@ impl Simulation {
             }
             _ => (0.42, 0.65),
         };
-        self.events.push_back(Gesture {
-            event: SfxEvent {
+        self.push_action(
+            Action::Trigger {
+                kind,
                 pan: position.pan(),
                 intensity: Unit::new(low + rng.f32() * (high - low))
                     .expect("humanized intensity is normalized"),
-                ..SfxEvent::new(kind)
             },
             after,
-        });
+        );
+    }
+
+    fn push_action(&mut self, action: Action, after: Duration) {
+        self.events.push_back(Gesture { action, after });
+    }
+
+    fn mode(&mut self, mode: Mode) {
+        self.push_action(Action::Mode(mode), Duration::from_millis(100));
     }
 
     fn visit(&mut self, region: Region, rng: &mut fastrand::Rng) {
@@ -339,6 +374,21 @@ impl Simulation {
             Workflow::Routine(routine)
         };
 
+        self.mode(Mode::Browse);
+        if elapsed >= self.next_market_at {
+            if self.market_index == self.markets.len() {
+                let previous = self.markets[self.market_index - 1];
+                rng.shuffle(&mut self.markets);
+                if self.markets[0] == previous {
+                    self.markets.rotate_left(1);
+                }
+                self.market_index = 0;
+            }
+            let preset = self.markets[self.market_index];
+            self.market_index += 1;
+            self.push_action(Action::Market(preset), Duration::from_millis(100));
+        }
+
         // Cross nearby controls before settling on an action, like a moving mouse.
         for _ in 0..rng.usize(4..=7) {
             let previous = self.hovered;
@@ -359,6 +409,7 @@ impl Simulation {
                 self.scroll_burst(rng.usize(2..=4), rng);
             }
         }
+        let mut zoom_steps = [0.5, 0.95].into_iter();
         for (kind, region) in self.workflow.interactions() {
             let position = match kind {
                 SfxKind::Notification
@@ -377,14 +428,49 @@ impl Simulation {
                 self.scroll_burst(rng.usize(6..=10), rng);
                 continue;
             }
+            match kind {
+                SfxKind::DialogOpen => self.mode(Mode::Dialog),
+                SfxKind::Focus if region != Region::Dialog => self.mode(Mode::Focus),
+                SfxKind::ZoomIn => {
+                    if zoom_steps.len() == 2 {
+                        self.mode(Mode::Focus);
+                    }
+                    let zoom = zoom_steps.next().expect("chart has two zoom-in steps");
+                    self.push_action(
+                        Action::Zoom(
+                            Unit::new(zoom + (rng.f32() - 0.5) * 0.06)
+                                .expect("chart zoom targets are normalized"),
+                        ),
+                        Duration::from_millis(100),
+                    );
+                }
+                SfxKind::ZoomOut => self.push_action(
+                    Action::Zoom(
+                        Unit::new(0.05 + rng.f32() * 0.15)
+                            .expect("overview zoom targets are normalized"),
+                    ),
+                    Duration::from_millis(100),
+                ),
+                _ => {}
+            }
             let after = Duration::from_millis(match kind {
                 SfxKind::ScrollbarMove | SfxKind::DragOver | SfxKind::Resize => rng.u64(100..=290),
-                SfxKind::Focus | SfxKind::Search => rng.u64(550..=1_500),
+                SfxKind::DialogOpen | SfxKind::Focus => rng.u64(4_000..=8_000),
+                SfxKind::ZoomIn if zoom_steps.len() == 0 => rng.u64(4_000..=8_000),
+                SfxKind::Search => rng.u64(550..=1_500),
                 SfxKind::OrderCreate => rng.u64(1_800..=4_000),
                 SfxKind::Disconnect => rng.u64(1_200..=2_800),
                 _ => rng.u64(220..=800),
             });
             self.push(kind, position, after, rng);
+            match kind {
+                SfxKind::DialogClose | SfxKind::ZoomOut => self.mode(Mode::Browse),
+                SfxKind::Blur if region != Region::Dialog => self.mode(Mode::Browse),
+                _ => {}
+            }
+        }
+        if matches!(self.workflow, Workflow::Order(OrderOutcome::Fill)) {
+            self.mode(Mode::Browse);
         }
         self.events
             .back_mut()
@@ -435,7 +521,7 @@ impl UserActivity {
     pub(super) fn advance(
         &mut self,
         elapsed: Duration,
-        send: &mut impl FnMut(SfxEvent) -> shzx_sfx::Result<()>,
+        send: &mut impl FnMut(Action) -> shzx_sfx::Result<()>,
     ) -> shzx_sfx::Result<()> {
         self.elapsed = elapsed;
         let Some(running) = &mut self.running else {
@@ -448,7 +534,10 @@ impl UserActivity {
             running.plan(elapsed, &mut self.rng);
         }
         let gesture = running.events.front().expect("planning queues a workflow");
-        send(gesture.event)?;
+        send(gesture.action)?;
+        if matches!(gesture.action, Action::Market(_)) {
+            running.next_market_at = elapsed + Duration::from_secs(self.rng.u64(25..=60));
+        }
         // Anchor to the host's current time: missed frames never become a burst.
         running.next_at = elapsed + gesture.after;
         running.events.pop_front();

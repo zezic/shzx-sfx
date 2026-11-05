@@ -1,5 +1,9 @@
 use serde::Serialize;
 
+mod rain;
+
+use rain::RainSpace;
+
 use crate::{
     BackgroundSnapshot, Chord, Command, GeneratedEvent, HarmonySnapshot, MarketContext, Mix, Mode,
     ParameterSnapshot, RenderConfig, Result, ReverbParameters, ReverbSettings, SpatialMode, Symbol,
@@ -68,12 +72,12 @@ pub struct Renderer {
     mode: Mode,
     focus: Smooth,
     mix: Mix,
-    mix_smoothers: [Smooth; 12],
+    mix_smoothers: [Smooth; 13],
     current_mix: Mix,
     master: Smooth,
     output_gain: Smooth,
     reverb: ReverbSettings,
-    reverb_smoothers: [ReverbSmoothers; 5],
+    reverb_smoothers: [ReverbSmoothers; 6],
     current_reverb: ReverbSettings,
     spatial: SpatialMode,
     environment_reverb: SpaceReverb,
@@ -81,6 +85,7 @@ pub struct Renderer {
     transmission_reverb: SpaceReverb,
     melody_reverb: SpaceReverb,
     accent_reverb: SpaceReverb,
+    rain: RainSpace,
     lowpass: [LowPass; 2],
     highpass: [HighPass; 2],
     wet_lowpass: [LowPass; 2],
@@ -146,6 +151,7 @@ impl Renderer {
             transmission_reverb,
             melody_reverb,
             accent_reverb,
+            rain: RainSpace::new(config.sample_rate, config.reverb.rain),
             lowpass: std::array::from_fn(|_| LowPass::new(rate, 1400.0)),
             highpass: std::array::from_fn(|_| HighPass::new(rate, 32.0)),
             wet_lowpass: std::array::from_fn(|_| LowPass::new(rate, 1800.0)),
@@ -233,7 +239,7 @@ impl Renderer {
         }
         self.background
             .control(self.sample, market, focus, self.symbol);
-        let [environment, events, transmission, melody, accents] =
+        let [environment, events, transmission, melody, accents, rain] =
             self.reverb_smoothers.each_mut().map(|bus| bus.tick());
         self.current_reverb = ReverbSettings {
             environment,
@@ -241,6 +247,7 @@ impl Renderer {
             transmission,
             melody,
             accents,
+            rain,
         };
         let parameters = environment_parameters(
             market.zoom.get(),
@@ -281,7 +288,9 @@ impl Renderer {
         let mut accents = self.current_reverb.accents;
         accents.width = Unit::clamped(accents.width.get() * width_scale);
         configure_reverb(&mut self.accent_reverb, accents.room_size.get(), accents);
-        let levels: [f32; 12] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
+        self.rain
+            .control(market.zoom.get(), focus, self.current_reverb.rain);
+        let levels: [f32; 13] = std::array::from_fn(|i| self.mix_smoothers[i].tick());
         self.current_mix = Mix {
             master: self.mix.master,
             output_gain: self.mix.output_gain,
@@ -297,6 +306,7 @@ impl Renderer {
             demonic_stutters: Unit::clamped(levels[9]),
             flying_coins: Unit::clamped(levels[10]),
             laser_beams: Unit::clamped(levels[11]),
+            rain: Unit::clamped(levels[12]),
         };
     }
 
@@ -317,6 +327,12 @@ impl Renderer {
         let background = self.background.tick(self.current_mix, pitch_ratio);
         let melody = background.melody;
         let accents = background.accents;
+        let rain = self.rain.tick(
+            background.rain,
+            self.current_mix.rain.get(),
+            self.current_reverb.rain.send.get(),
+            self.current_mix.reverb.get(),
+        );
         let background = background.environment;
         let raw_ui = self.sfx.tick_scaled(pitch_ratio);
         let transmission = self.transmission.tick(pitch_ratio);
@@ -357,6 +373,7 @@ impl Renderer {
             // High-register accents have source band-limiting and a brighter
             // space. The scene's low-pass continues to darken the bed.
             let bg = self.lowpass[i].tick(self.highpass[i].tick(distant))
+                + rain[i]
                 + accents[i] * (0.9 - focus * 0.65 - self.zoom_amount * 0.2)
                 + accent_wet[i] * wet;
             let effect =
@@ -473,6 +490,12 @@ impl Renderer {
             melody: self.background.melody(self.sample),
             detail_delay,
             melody_delay,
+            rain: self.rain.snapshot(
+                self.zoom_amount,
+                focus,
+                self.market.zoom.get(),
+                target_focus,
+            ),
             demonic_voices,
             demonic_stutters,
             flying_coins,
@@ -509,13 +532,14 @@ fn new_reverb(sample_rate: u32, parameters: ReverbParameters) -> SpaceReverb {
     reverb
 }
 
-fn reverb_buses(settings: ReverbSettings) -> [ReverbParameters; 5] {
+fn reverb_buses(settings: ReverbSettings) -> [ReverbParameters; 6] {
     [
         settings.environment,
         settings.events,
         settings.transmission,
         settings.melody,
         settings.accents,
+        settings.rain,
     ]
 }
 
@@ -573,7 +597,7 @@ fn market_values(market: MarketContext) -> [f32; 5] {
     ]
 }
 
-fn mix_values(mix: Mix) -> [f32; 12] {
+fn mix_values(mix: Mix) -> [f32; 13] {
     [
         mix.drone.get(),
         mix.texture.get(),
@@ -587,6 +611,7 @@ fn mix_values(mix: Mix) -> [f32; 12] {
         mix.demonic_stutters.get(),
         mix.flying_coins.get(),
         mix.laser_beams.get(),
+        mix.rain.get(),
     ]
 }
 

@@ -703,3 +703,66 @@ attributing the apparent interactive improvement to the implementation. They
 measure offline throughput, not native callback CPU or scheduling. Hashes,
 raw runs, and means are in `target/voice-analysis/detail-paired-benchmarks.json`;
 test logs use the `detail-` prefix in the same directory.
+
+## Procedural rain and cabin perspective
+
+Checked 2026-11-05. The rain layer uses a separate seeded stream, a stereo
+diffuse wash, and six fixed material patches with overlapping damped impacts.
+It has independent mixer and reverb controls. The background's existing
+smoothed focus and zoom drive its perspective; no new playback commands are
+needed. [Primary research and design choices](rain-synthesis-research.md).
+
+At overview zoom, exterior rain passes through two 3.8 kHz low-pass stages.
+Dialog reduces the dry multiplier from 0.85 to 0.17 and increases the return
+multiplier from 0.65 to 2.45. Focus uses the intermediate 0.408 / 1.82 balance.
+These multipliers apply in addition to the independent rain mixer, reverb
+send/wet settings, and shared reverb level. Rain keeps generating and its
+reverb remains alive through all transitions.
+
+The cabin blend starts above 45% zoom and reaches full strength at deepest
+zoom, with a smoothstep contour. Exterior cutoff falls toward 550 Hz. Nearby
+roof/body impacts use a low-passed contact plus noise-dominant excitation with
+a 2 ms attack and 30-61 ms exponential decay. Two damped modes and two 1.1 kHz
+output low-pass stages color that body. Larger hits drive more body, while
+max-retriggering prevents overlapping contacts from accumulating without
+bound. Exterior level falls to 60% inside the
+cabin, and the long reverb return decreases. These filter and mix values are
+artistic settings, not measured vehicle properties.
+
+The source test verifies seeded stereo output, bounds, and nonzero power at
+8, 48, and 192 kHz. Integration checks cover independent linear rain gain,
+reverb-bus isolation, source muting with persistent tails, dry/wet focus
+balance, smooth transitions, and input/default deserialization. A short-window
+contrast check catches an exterior texture dominated by steady noise, and
+isolated cabin-strike tests require sustained energy after the contact and a
+central energy duration longer than 20 ms. The existing varied-block and
+allocation-free command/render tests include rain and pass.
+
+The texture uses independent noise for each material patch, 90 randomized
+impacts per second, 0.6 ms smoothed splash attacks, and seeded 6-25 ms decays.
+The wash is quiet enough to expose these details. A 12-second, 48 kHz
+component isolation at seed 123 measures exterior details at +0.75 dB relative
+to the wash (54.3% of their combined component energy). The combined exterior
+20 ms RMS p90/p10 ratio is 1.70. At the current 1.7 / 1.2 modal gains, cabin
+source stereo RMS over three seconds is 0.01084 / 0.01079 / 0.01099 at
+8 / 48 / 192 kHz; peaks are 0.08274 / 0.06841 / 0.07561. The default rain
+mixer is 0.02. Isolated hits across three seeds and these rates retain
+47-75% of their energy at 15-80 ms, with central energy durations of
+45-65 ms. Exact comparison against the exterior source before this body
+change finds zero differing f32 samples at those rates and seeds 123 / 456.
+
+`target/rain-detail-analysis/measure.py` reproduces component isolation and
+spectral measurements. `target/rain-detail-analysis/temporal.py` measures
+isolated contacts. Body comparisons and the gain-matched audition are in
+`target/rain-body-analysis`. These are listening artifacts; numerical checks
+alone do not establish perceptual realism.
+
+The source, rain, engine, and real-time command checks pass. The same four
+existing sub/harmony failures recorded above reproduce on unchanged HEAD.
+Relevant logs are `target/rain-body-analysis/regression-tests.log` and
+`target/rain-baseline-tests.log`. Strict Clippy with all features, formatting,
+and whitespace checks pass.
+
+A 20-second, 48 kHz interactive render at seed 123 and 256-frame blocks took
+1.803 seconds (9.02% of realtime wall time) with rain enabled. This measures
+offline throughput and excludes device callback scheduling and latency.

@@ -507,6 +507,15 @@ pub struct AmbientSnapshot {
     pub clock: ClockState,
 }
 
+/// Rain perspective follows the scene's smoothed focus and zoom controls.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct RainSnapshot {
+    pub exterior_lowpass_hz: ParameterSnapshot,
+    pub dry_gain: ParameterSnapshot,
+    pub reverb_gain: ParameterSnapshot,
+    pub cabin_mix: ParameterSnapshot,
+}
+
 /// Current environment state, destinations, and autonomous arrangement clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct BackgroundSnapshot {
@@ -528,6 +537,7 @@ pub struct BackgroundSnapshot {
     pub laser_beams: AmbientSnapshot,
     pub detail_delay: DelaySnapshot,
     pub melody_delay: DelaySnapshot,
+    pub rain: RainSnapshot,
 }
 
 /// Layer levels are linear amplitude multipliers. Master defaults conservatively.
@@ -539,6 +549,7 @@ pub struct Mix {
     pub drone: Unit,
     pub sub: Unit,
     pub texture: Unit,
+    pub rain: Unit,
     pub harmony: Unit,
     pub melody: Unit,
     pub demonic_voices: Unit,
@@ -559,14 +570,15 @@ impl Default for Mix {
             drone: Unit(0.35),
             sub: Unit(0.35),
             texture: Unit(0.45),
+            rain: Unit(0.02),
             harmony: Unit(0.55),
             melody: Unit(0.08),
             demonic_voices: Unit(0.3),
             demonic_stutters: Unit(0.2),
-            flying_coins: Unit(0.05),
-            laser_beams: Unit(0.05),
+            flying_coins: Unit(0.04),
+            laser_beams: Unit(0.03),
             ui: Unit(0.316_227_76),
-            transmission: Unit(0.10),
+            transmission: Unit(0.04),
             reverb: Unit(0.5),
         }
     }
@@ -592,6 +604,7 @@ pub struct ReverbSettings {
     pub transmission: ReverbParameters,
     pub melody: ReverbParameters,
     pub accents: ReverbParameters,
+    pub rain: ReverbParameters,
 }
 
 impl Default for ReverbSettings {
@@ -631,6 +644,13 @@ impl Default for ReverbSettings {
                 damping: Unit(0.08),
                 width: Unit(0.92),
                 wet: Unit(0.32),
+            },
+            rain: ReverbParameters {
+                send: Unit(0.65),
+                room_size: Unit(0.72),
+                damping: Unit(0.55),
+                width: Unit(0.90),
+                wet: Unit(0.28),
             },
         }
     }

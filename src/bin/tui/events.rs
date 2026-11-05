@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, time::Duration};
 
-use shzx_sfx::SfxEvent;
+use shzx_sfx::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EventSource {
@@ -20,7 +20,7 @@ impl EventSource {
 pub(super) struct LoggedEvent {
     pub(super) at: Duration,
     pub(super) source: EventSource,
-    pub(super) event: SfxEvent,
+    pub(super) command: Command,
 }
 
 #[derive(Default)]
@@ -36,14 +36,14 @@ impl EventLog {
         self.elapsed = elapsed;
     }
 
-    pub(super) fn record(&mut self, source: EventSource, event: SfxEvent) {
+    pub(super) fn record(&mut self, source: EventSource, command: Command) {
         if self.entries.len() == Self::CAPACITY {
             self.entries.pop_front();
         }
         self.entries.push_back(LoggedEvent {
             at: self.elapsed,
             source,
-            event,
+            command,
         });
     }
 

@@ -213,6 +213,7 @@ fn mode_width_does_not_change_the_dry_event_pan() {
         demonic_stutters: Unit::ZERO,
         flying_coins: Unit::ZERO,
         laser_beams: Unit::ZERO,
+        rain: Unit::ZERO,
         sub: Unit::ZERO,
         texture: Unit::ZERO,
         harmony: Unit::ZERO,

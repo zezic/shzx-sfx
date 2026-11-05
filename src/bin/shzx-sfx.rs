@@ -132,6 +132,7 @@ enum MixLayer {
     Drone,
     Sub,
     Texture,
+    Rain,
     Harmony,
     Melody,
     DemonicVoices,
@@ -151,26 +152,30 @@ enum ReverbBus {
     Transmission,
     Melody,
     Accents,
+    Rain,
 }
 
 #[cfg(feature = "playback")]
 impl ReverbBus {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Environment,
         Self::Events,
         Self::Transmission,
         Self::Melody,
         Self::Accents,
+        Self::Rain,
     ];
     #[cfg(feature = "tui")]
-    fn label(self) -> &'static str {
+    fn label(self, width: u16) -> &'static str {
         match self {
             Self::Environment => "Environment",
             Self::Events => "UI / events",
+            Self::Transmission if width < 12 => "Transmit",
             Self::Transmission => "Transmission",
             Self::Melody => "Melody",
             Self::Accents => "Accents",
+            Self::Rain => "Rain",
         }
     }
     fn get(self, settings: ReverbSettings) -> ReverbParameters {
@@ -180,6 +185,7 @@ impl ReverbBus {
             Self::Transmission => settings.transmission,
             Self::Melody => settings.melody,
             Self::Accents => settings.accents,
+            Self::Rain => settings.rain,
         }
     }
     fn set(self, settings: &mut ReverbSettings, parameters: ReverbParameters) {
@@ -189,6 +195,7 @@ impl ReverbBus {
             Self::Transmission => &mut settings.transmission,
             Self::Melody => &mut settings.melody,
             Self::Accents => &mut settings.accents,
+            Self::Rain => &mut settings.rain,
         } = parameters;
     }
 }
@@ -249,11 +256,12 @@ impl ReverbField {
 
 impl MixLayer {
     #[cfg(feature = "tui")]
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Master,
         Self::Drone,
         Self::Sub,
         Self::Texture,
+        Self::Rain,
         Self::Harmony,
         Self::Melody,
         Self::DemonicVoices,
@@ -272,6 +280,7 @@ impl MixLayer {
             Self::Drone => mix.drone,
             Self::Sub => mix.sub,
             Self::Texture => mix.texture,
+            Self::Rain => mix.rain,
             Self::Harmony => mix.harmony,
             Self::Melody => mix.melody,
             Self::DemonicVoices => mix.demonic_voices,
@@ -290,6 +299,7 @@ impl MixLayer {
             Self::Drone => &mut mix.drone,
             Self::Sub => &mut mix.sub,
             Self::Texture => &mut mix.texture,
+            Self::Rain => &mut mix.rain,
             Self::Harmony => &mut mix.harmony,
             Self::Melody => &mut mix.melody,
             Self::DemonicVoices => &mut mix.demonic_voices,
@@ -902,6 +912,7 @@ fn palette(args: PaletteArgs) -> CliResult<()> {
     config.mix.demonic_stutters = Unit::ZERO;
     config.mix.flying_coins = Unit::ZERO;
     config.mix.laser_beams = Unit::ZERO;
+    config.mix.rain = Unit::ZERO;
     let mut entries = Vec::new();
     for kind in SfxKind::iter() {
         for variation in 0..args.variations {
@@ -1095,6 +1106,7 @@ fn run(cli: Cli) -> CliResult<()> {
                 config.mix.demonic_stutters = Unit::ZERO;
                 config.mix.flying_coins = Unit::ZERO;
                 config.mix.laser_beams = Unit::ZERO;
+                config.mix.rain = Unit::ZERO;
                 vec![TimedCommand {
                     at_seconds: (args.seconds * 0.1).min(0.25),
                     command: Command::Trigger(SfxEvent {
@@ -1484,7 +1496,7 @@ fn repl(engine: &mut shzx_sfx::AudioEngine, mut mix: Mix) -> CliResult<()> {
 #[cfg(feature = "playback")]
 fn repl_help() {
     println!(
-        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  harmony diatonic|dissonant\n  symbol TICKER                  select the ticker harmony\n  mix master|drone|sub|texture|harmony|melody|ui|transmission|reverb LEVEL\n  mix demonic-voices|demonic-stutters|flying-coins|laser-beams LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody|accents send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
+        "Commands:\n  trigger KIND [PAN INTENSITY LAYER]\n                                 layer all/body/texture/tonal/flecks/shimmer/crisp\n  market TREND STRENGTH VOLUME VOLATILITY ZOOM ACTIVITY\n                                 trend bearish/sideways/bullish, values 0..1\n  mode browse|dialog|focus\n  harmony diatonic|dissonant\n  symbol TICKER                  select the ticker harmony\n  mix master|drone|sub|texture|rain|harmony|melody|ui|transmission|reverb LEVEL\n  mix demonic-voices|demonic-stutters|flying-coins|laser-beams LEVEL\n  gain DB                        output trim -60..+24 dB\n  reverb environment|events|transmission|melody|accents|rain send|room|damping|width|wet LEVEL\n                                 independent sends and wet returns, 0..1\n  transmission start [PAN] | pan PAN | end\n  spatial pan|haas\n  inspect KIND                    show the nominal synthesis recipe\n  status\n  wait SECONDS\n  help\n  quit\nUse `shzx-sfx list` for all effect names."
     );
 }
 
@@ -1511,6 +1523,49 @@ mod tests {
             };
             assert_eq!(args.engine.config().unwrap().harmony_mode, expected);
         }
+    }
+
+    #[test]
+    fn rain_can_be_muted_from_the_command_line() {
+        let cli = Cli::try_parse_from([
+            "shzx-sfx",
+            "render",
+            "--output",
+            "/tmp/rain.wav",
+            "--mute-layer",
+            "rain",
+        ])
+        .unwrap();
+        let Action::Render(args) = cli.command else {
+            unreachable!()
+        };
+        let expected = Mix {
+            rain: Unit::ZERO,
+            ..Mix::default()
+        };
+        assert_eq!(args.engine.config().unwrap().mix, expected);
+    }
+
+    #[cfg(feature = "playback")]
+    #[test]
+    fn repl_rain_gain_and_reverb_controls_preserve_other_layers() {
+        let mix = Mix::default();
+        let reverb = ReverbSettings::default();
+        let mut expected_mix = mix;
+        expected_mix.rain = Unit::new(0.4).unwrap();
+        let mut expected_reverb = reverb;
+        expected_reverb.rain.wet = Unit::new(0.5).unwrap();
+        for (text, expected) in [
+            ("mix rain 0.4", Command::Mix(expected_mix)),
+            ("reverb rain wet 0.5", Command::Reverb(expected_reverb)),
+        ] {
+            let ReplAction::Send(command) = repl_command(text, mix, reverb).unwrap() else {
+                panic!("rain controls send a command")
+            };
+            assert_eq!(*command, expected);
+        }
+        assert!(repl_command("mix rain 1.1", mix, reverb).is_err());
+        assert!(repl_command("reverb rain send -0.1", mix, reverb).is_err());
     }
 
     #[cfg(feature = "playback")]

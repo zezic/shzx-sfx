@@ -386,6 +386,23 @@ fn output_boost_and_independent_reverb_sends_obey_input_and_queue_contracts() {
     assert_eq!(app.reverb.events, before_accents.events);
     assert_eq!(app.reverb.transmission, before_accents.transmission);
     assert_eq!(app.reverb.melody, before_accents.melody);
+    let mut expected = app.reverb;
+    expected.rain.send = Unit::new(0.45).unwrap();
+    expected.rain.wet = Unit::new(0.43).unwrap();
+    app.adjust(
+        Control::Reverb(ReverbBus::Rain, ReverbField::Send),
+        -0.20,
+        &mut send,
+    );
+    app.adjust(
+        Control::Reverb(ReverbBus::Rain, ReverbField::Wet),
+        0.15,
+        &mut send,
+    );
+    assert!((app.reverb.rain.send.get() - expected.rain.send.get()).abs() < 0.00001);
+    assert!((app.reverb.rain.wet.get() - expected.rain.wet.get()).abs() < 0.00001);
+    expected.rain = app.reverb.rain;
+    assert_eq!(app.reverb, expected);
     assert_eq!(commands.last(), Some(&Command::Reverb(app.reverb)));
     assert!(
         commands
@@ -937,6 +954,10 @@ fn automatic_tickers_reproduce_and_switch_once_per_random_deadline() {
             });
             assert_eq!(sent, [Command::Symbol(next.symbol)]);
             assert_eq!(app.symbol, next.symbol);
+            assert_eq!(
+                app.event_log.entries().next_back().unwrap().source,
+                events::EventSource::Simulator
+            );
         }
         symbols.insert(next.symbol);
         intervals.insert(interval);
@@ -1107,12 +1128,10 @@ fn user_activity_starts_on_and_mouse_keyboard_and_reset_control_its_lifetime() {
     assert!(app.activity.enabled());
     let mut events = Vec::new();
     app.advance(Duration::from_secs(3_602), &mut |command| {
-        if let Command::Trigger(event) = command {
-            events.push(event);
-        }
+        events.push(command);
         Ok(())
     });
-    assert_eq!(events.len(), 1);
+    assert_eq!(events, [Command::Mode(Mode::Browse)]);
 }
 
 #[test]
@@ -1134,8 +1153,6 @@ fn simulated_events_use_sound_edits_and_preserve_the_manual_audition_and_editor(
         app.event_intensity,
         app.focus,
         app.overlay,
-        app.mode,
-        app.market,
     );
     assert!(app.activity.enabled());
     let notice = app.notice.clone();
@@ -1163,22 +1180,18 @@ fn simulated_events_use_sound_edits_and_preserve_the_manual_audition_and_editor(
             app.event_intensity,
             app.focus,
             app.overlay,
-            app.mode,
-            app.market,
         )
     );
     assert_eq!(app.notice, notice);
 }
 
 #[test]
-fn event_log_records_accepted_simulator_and_manual_events_once_with_their_parameters() {
+fn event_log_records_accepted_simulator_and_manual_commands_once_with_their_parameters() {
     let mut app = app();
     assert_eq!(app.event_log.entries().len(), 0);
     let mut rejected = None;
     app.advance(Duration::from_secs(2), &mut |command| {
-        if let Command::Trigger(event) = command {
-            rejected = Some(event);
-        }
+        rejected = Some(command);
         Err(shzx_sfx::Error::QueueFull)
     });
     assert!(rejected.is_some());
@@ -1189,7 +1202,7 @@ fn event_log_records_accepted_simulator_and_manual_events_once_with_their_parame
     let entry = app.event_log.entries().next().unwrap();
     assert_eq!(entry.at, retried_at);
     assert_eq!(entry.source, events::EventSource::Simulator);
-    assert_eq!(Some(entry.event), rejected);
+    assert_eq!(Some(entry.command), rejected);
 
     app.event_pan = Pan::new(-0.8).unwrap();
     app.event_intensity = Unit::new(0.7).unwrap();
@@ -1201,8 +1214,8 @@ fn event_log_records_accepted_simulator_and_manual_events_once_with_their_parame
     assert_eq!(entry.at, retried_at);
     assert_eq!(entry.source, events::EventSource::User);
     assert_eq!(
-        entry.event,
-        app.event(SfxKind::Click, SfxLayerSelection::All)
+        entry.command,
+        Command::Trigger(app.event(SfxKind::Click, SfxLayerSelection::All))
     );
 }
 
@@ -1210,6 +1223,7 @@ fn event_log_records_accepted_simulator_and_manual_events_once_with_their_parame
 fn event_log_retains_a_bounded_recent_history_across_pause_and_reset() {
     let mut app = app();
     app.activity.toggle();
+    app.ticker_navigation.toggle(app.symbol);
     for second in 0..140 {
         app.advance(Duration::from_secs(second), &mut |_| Ok(()));
         app.fire(SfxKind::Click, &mut |_| Ok(()));
@@ -1230,4 +1244,91 @@ fn event_log_retains_a_bounded_recent_history_across_pause_and_reset() {
         app.event_log.entries().next_back().unwrap().at,
         Duration::from_secs(139)
     );
+    assert!(app.event_log.entries().any(|entry| {
+        entry.at == Duration::from_secs(139)
+            && matches!(entry.command, Command::Trigger(event) if event.kind == SfxKind::Click)
+    }));
+}
+
+#[test]
+fn activity_commands_drive_accepted_scene_and_market_state_with_independent_zoom() {
+    let mut app = app();
+    app.ticker_navigation.toggle(app.symbol);
+    let mut modes = Vec::new();
+    let mut markets = Vec::new();
+    let mut zoomed_in = false;
+    let mut zoomed_out = false;
+    let mut requests = 0;
+    let mut pending = None;
+    for tick in 0..12_000 {
+        let before = (app.mode, app.market);
+        let mut requested = None;
+        let mut rejected = false;
+        app.advance(Duration::from_millis(tick * 80), &mut |command| {
+            assert!(requested.replace(command).is_none());
+            if let Some(previous) = pending.take() {
+                assert_eq!(
+                    command, previous,
+                    "retry the pending action before continuing"
+                );
+            }
+            requests += 1;
+            rejected = requests % 7 == 0;
+            if rejected {
+                pending = Some(command);
+                Err(shzx_sfx::Error::QueueFull)
+            } else {
+                Ok(())
+            }
+        });
+        let Some(command) = requested else {
+            assert_eq!((app.mode, app.market), before);
+            continue;
+        };
+        if rejected {
+            assert_eq!((app.mode, app.market), before);
+            continue;
+        }
+        let logged = app.event_log.entries().next_back().unwrap();
+        assert_eq!(logged.source, events::EventSource::Simulator);
+        assert_eq!(logged.command, command);
+        match command {
+            Command::Mode(mode) => {
+                assert_eq!(app.mode, mode);
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+            }
+            Command::Market(market) => {
+                assert_eq!(app.market, market);
+                let without_zoom = |market: MarketContext| MarketContext {
+                    zoom: Unit::ZERO,
+                    ..market
+                };
+                if market.zoom != before.1.zoom {
+                    assert_eq!(without_zoom(market), without_zoom(before.1));
+                } else {
+                    for preset in [
+                        Preset::Idle,
+                        Preset::Bullish,
+                        Preset::Bearish,
+                        Preset::Volatile,
+                    ] {
+                        if without_zoom(market) == without_zoom(preset.market())
+                            && !markets.contains(&preset)
+                        {
+                            markets.push(preset);
+                        }
+                    }
+                }
+                zoomed_in |= market.zoom.get() >= 0.9;
+                zoomed_out |= zoomed_in && market.zoom.get() <= 0.2;
+            }
+            Command::Trigger(_) => assert_eq!((app.mode, app.market), before),
+            _ => panic!("activity only changes scene, market, zoom, and UI sounds"),
+        }
+    }
+    assert_eq!(modes.len(), 3);
+    assert_eq!(markets.len(), 4);
+    assert!(zoomed_in && zoomed_out);
 }

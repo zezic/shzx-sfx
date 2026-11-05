@@ -7,6 +7,7 @@ use crate::{
     harmony::midi_hz,
 };
 
+pub(crate) mod rain;
 mod tones;
 mod voices;
 
@@ -240,6 +241,7 @@ pub(crate) struct BackgroundFrame {
     pub environment: [f32; 2],
     pub melody: [f32; 2],
     pub accents: [f32; 2],
+    pub rain: rain::RainFrame,
 }
 
 pub(crate) struct Background {
@@ -282,6 +284,7 @@ pub(crate) struct Background {
     coins: ScheduledTone,
     lasers: ScheduledTone,
     accent_rng: fastrand::Rng,
+    rain: rain::Rain,
 }
 
 impl Background {
@@ -344,6 +347,7 @@ impl Background {
             coins: ScheduledTone::new(rate, ToneKind::FlyingCoins, 4),
             lasers: ScheduledTone::new(rate, ToneKind::LaserBeams, 12),
             accent_rng: fastrand::Rng::with_seed(seed ^ 0x4143_4345_4e54),
+            rain: rain::Rain::new(rate, seed ^ 0x5241_494e),
             rng,
         }
     }
@@ -623,6 +627,7 @@ impl Background {
         let coins = self.coins.sound.tick(&self.table);
         let lasers = self.lasers.sound.tick(&self.table);
         BackgroundFrame {
+            rain: self.rain.tick(),
             environment: std::array::from_fn(|i| {
                 drone[i] * mix.drone.get()
                     + sub[i] * mix.sub.get()

@@ -175,6 +175,7 @@ fn rendering_and_every_command_remain_allocation_free_after_construction() {
                 demonic_stutters: Unit::ONE,
                 flying_coins: Unit::ONE,
                 laser_beams: Unit::ONE,
+                rain: Unit::ONE,
                 ..Mix::default()
             }),
             Command::Reverb(ReverbSettings::default()),

@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
+use shzx_sfx::SfxEvent;
 use strum::IntoEnumIterator;
 
 use super::*;
 
-fn accept_next(activity: &mut UserActivity) -> (Duration, SfxEvent, Workflow) {
+fn accept_next(activity: &mut UserActivity) -> (Duration, Action, Workflow) {
     let at = activity.running.as_ref().unwrap().next_at;
     let mut events = Vec::new();
     activity
@@ -19,9 +20,31 @@ fn accept_next(activity: &mut UserActivity) -> (Duration, SfxEvent, Workflow) {
     (at, events[0], running.workflow)
 }
 
-fn trace(seed: u64, count: usize) -> Vec<(Duration, SfxEvent, Workflow)> {
+fn action_trace(seed: u64, count: usize) -> Vec<(Duration, Action, Workflow)> {
     let mut activity = UserActivity::new(seed);
     (0..count).map(|_| accept_next(&mut activity)).collect()
+}
+
+fn trace(seed: u64, count: usize) -> Vec<(Duration, SfxEvent, Workflow)> {
+    action_trace(seed, count)
+        .into_iter()
+        .filter_map(|(at, action, workflow)| match action {
+            Action::Trigger {
+                kind,
+                pan,
+                intensity,
+            } => Some((
+                at,
+                SfxEvent {
+                    pan,
+                    intensity,
+                    ..SfxEvent::new(kind)
+                },
+                workflow,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -213,8 +236,10 @@ fn activity_starts_enabled_and_can_pause_resume_and_reset() {
 }
 
 #[test]
-fn queue_rejection_retries_the_same_humanized_event_before_advancing() {
+fn queue_rejection_retries_the_same_action_without_replaying_an_accepted_mode() {
     let mut activity = UserActivity::new(1234);
+    let (_, accepted_mode, _) = accept_next(&mut activity);
+    assert_eq!(accepted_mode, Action::Mode(Mode::Browse));
     let due = activity.running.as_ref().unwrap().next_at;
     let mut rejected = None;
     let result = activity.advance(due, &mut |event| {
@@ -232,6 +257,7 @@ fn queue_rejection_retries_the_same_humanized_event_before_advancing() {
         })
         .unwrap();
     assert_eq!(accepted, rejected);
+    assert!(matches!(accepted, Some(Action::Trigger { .. })));
     let running = activity.running.as_ref().unwrap();
     assert_eq!(running.events.len(), queued - 1);
     assert!(running.next_at > retry_at);
@@ -261,4 +287,119 @@ fn suspension_advances_one_gesture_and_rebases_the_next_deadline() {
             panic!("missed events must not catch up in a burst")
         })
         .unwrap();
+}
+
+#[test]
+fn workflow_state_actions_match_dialog_focus_and_chart_lifecycles() {
+    let actions = action_trace(1234, 5_000);
+    assert_eq!(actions, action_trace(1234, 5_000));
+    let mut mode = Mode::Browse;
+    let mut entered_at = Duration::ZERO;
+    let mut modes = Vec::new();
+    let mut deep_zoom_at = None;
+    let mut zoom_transitions = 0;
+    for (at, action, workflow) in actions {
+        match action {
+            Action::Mode(next) => {
+                if next != mode {
+                    if matches!(mode, Mode::Dialog | Mode::Focus) {
+                        assert!(at - entered_at >= Duration::from_secs(4));
+                    }
+                    entered_at = at;
+                    mode = next;
+                }
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+            }
+            Action::Trigger { kind, .. } => match kind {
+                SfxKind::DialogOpen | SfxKind::DialogClose => assert_eq!(mode, Mode::Dialog),
+                SfxKind::Focus | SfxKind::Blur => assert_eq!(
+                    mode,
+                    if workflow == Workflow::Routine(Routine::Dialog) {
+                        Mode::Dialog
+                    } else {
+                        Mode::Focus
+                    }
+                ),
+                SfxKind::ZoomIn | SfxKind::ZoomOut => assert_eq!(mode, Mode::Focus),
+                _ => {}
+            },
+            Action::Zoom(zoom) => {
+                assert_eq!(workflow, Workflow::Routine(Routine::Chart));
+                if zoom.get() >= 0.9 {
+                    assert!((0.9..=0.98).contains(&zoom.get()));
+                    assert!(deep_zoom_at.replace(at).is_none());
+                } else if zoom.get() <= 0.2 {
+                    let entered = deep_zoom_at.take().expect("overview follows deep zoom");
+                    assert!(at - entered >= Duration::from_secs(4));
+                    zoom_transitions += 1;
+                } else {
+                    assert!((0.4..=0.6).contains(&zoom.get()));
+                    assert!(deep_zoom_at.is_none());
+                }
+            }
+            Action::Market(_) => {}
+        }
+    }
+    assert_eq!(modes.len(), 3);
+    assert!(zoom_transitions > 5);
+}
+
+#[test]
+fn market_changes_cover_every_regime_once_per_shuffled_cycle_and_rebase_after_acceptance() {
+    let actions = action_trace(1234, 5_000);
+    let changes: Vec<_> = actions
+        .iter()
+        .filter_map(|(at, action, _)| match action {
+            Action::Market(preset) => Some((*at, *preset)),
+            _ => None,
+        })
+        .collect();
+    assert!(changes.len() >= 12);
+    for cycle in changes.as_chunks::<4>().0 {
+        for preset in [
+            Preset::Idle,
+            Preset::Bullish,
+            Preset::Bearish,
+            Preset::Volatile,
+        ] {
+            assert_eq!(
+                cycle.iter().filter(|(_, value)| *value == preset).count(),
+                1
+            );
+        }
+    }
+    for pair in changes.windows(2) {
+        assert_ne!(pair[0].1, pair[1].1);
+        assert!(pair[1].0 - pair[0].0 >= Duration::from_secs(25));
+    }
+
+    let mut activity = UserActivity::new(1234);
+    let due = activity.running.as_ref().unwrap().next_at;
+    activity.running.as_mut().unwrap().next_market_at = due;
+    assert_eq!(accept_next(&mut activity).1, Action::Mode(Mode::Browse));
+    let next_at = activity.running.as_ref().unwrap().next_at;
+    let mut rejected = None;
+    activity
+        .advance(next_at, &mut |action| {
+            rejected = Some(action);
+            Err(shzx_sfx::Error::QueueFull)
+        })
+        .unwrap_err();
+    assert!(matches!(rejected, Some(Action::Market(_))));
+    assert_eq!(activity.running.as_ref().unwrap().next_market_at, due);
+    let retried_at = next_at + Duration::from_secs(100);
+    let mut accepted = None;
+    activity
+        .advance(retried_at, &mut |action| {
+            accepted = Some(action);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(accepted, rejected);
+    assert!(
+        (Duration::from_secs(25)..=Duration::from_secs(60))
+            .contains(&(activity.running.as_ref().unwrap().next_market_at - retried_at))
+    );
 }

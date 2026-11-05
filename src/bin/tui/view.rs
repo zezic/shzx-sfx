@@ -8,9 +8,9 @@ use ratatui::{
 };
 use shzx_sfx::{
     AmbientSnapshot, AudioStatus, BackgroundVoice, BufferSize, ChordTransition, ClockState,
-    DelaySnapshot, HarmonyMode, Mode, Pan, ParameterSnapshot, RootTransition, SfxKind, SfxLayer,
-    SfxLayerRecipe, SfxLayerSelection, SfxLayerState, SfxLayerStereo, SfxModulation, SfxRecipe,
-    Snapshot, SpatialMode, Trend, Unit,
+    Command, DataTransmissionCommand, DelaySnapshot, HarmonyMode, Mode, Pan, ParameterSnapshot,
+    RootTransition, SfxKind, SfxLayer, SfxLayerRecipe, SfxLayerSelection, SfxLayerState,
+    SfxLayerStereo, SfxModulation, SfxRecipe, Snapshot, SpatialMode, Trend, Unit,
 };
 use strum::IntoEnumIterator;
 
@@ -510,16 +510,57 @@ fn user_events(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for (index, entry) in entries.skip(skipped).enumerate() {
         frame.render_widget(
             Paragraph::new(format!(
-                "{:7.2}s {:4} {:<18} pan {:+.2} / {:3.0}%",
+                "{:7.2}s {:4} {}",
                 entry.at.as_secs_f64(),
                 entry.source.label(),
-                entry.event.kind,
-                entry.event.pan.get(),
-                entry.event.intensity.get() * 100.0,
+                command_text(entry.command),
             ))
             .style(Style::default().fg(TEXT)),
             Rect::new(area.x, first_row + index as u16, area.width, 1),
         );
+    }
+}
+
+fn command_text(command: Command) -> String {
+    match command {
+        Command::Trigger(event) => format!(
+            "{:<18} pan {:+.2} / {:3.0}%",
+            event.kind,
+            event.pan.get(),
+            event.intensity.get() * 100.0,
+        ),
+        Command::Mode(mode) => format!(
+            "scene {}",
+            match mode {
+                Mode::Browse => "browse / bunker",
+                Mode::Dialog => "dialog / distant",
+                Mode::Focus => "focus / thinned",
+            }
+        ),
+        Command::Market(market) => format!(
+            "market {} | zoom {:3.0}% | volume {:3.0}% | volatility {:3.0}%",
+            market.trend,
+            market.zoom.get() * 100.0,
+            market.volume.get() * 100.0,
+            market.volatility.get() * 100.0,
+        ),
+        Command::Symbol(symbol) => format!("symbol {symbol}"),
+        Command::Harmony(mode) => format!("harmony {mode}"),
+        Command::Mix(mix) => format!(
+            "mix master {:.0}% | UI {:.0}% | output {:+.1}dB",
+            mix.master.get() * 100.0,
+            mix.ui.get() * 100.0,
+            mix.output_gain.db(),
+        ),
+        Command::Reverb(_) => "reverb settings updated".into(),
+        Command::Spatial(mode) => format!("spatial {mode}"),
+        Command::DataTransmission(transmission) => match transmission {
+            DataTransmissionCommand::Start(settings) => {
+                format!("transmission start | pan {:+.2}", settings.pan.get())
+            }
+            DataTransmissionCommand::Pan(pan) => format!("transmission pan {:+.2}", pan.get()),
+            DataTransmissionCommand::End => "transmission end".into(),
+        },
     }
 }
 
@@ -553,7 +594,9 @@ fn slider(
     hits: &mut HitMap,
 ) {
     let focus = app.focus == control;
-    let value_width = if area.width < 32 {
+    let value_width = if label.is_empty() {
+        value.display.len() as u16 + 2
+    } else if area.width < 32 {
         value.display.len() as u16 + 3
     } else {
         (value.display.len() as u16 + 4).max(10)
@@ -564,7 +607,11 @@ fn slider(
     } else {
         16.min(area.width.saturating_sub(value_width + bar_padding)) as usize
     };
-    let label_width = label_chars as u16 + 3;
+    let label_width = if label.is_empty() {
+        1
+    } else {
+        label_chars as u16 + 3
+    };
     let bar_width = area.width.saturating_sub(label_width + value_width);
     let filled = (value.position.clamp(0.0, 1.0) * bar_width as f32).round() as usize;
     let bar = format!(
@@ -575,15 +622,16 @@ fn slider(
     let style = Style::default()
         .fg(if focus { CYAN } else { TEXT })
         .bg(if focus { FOCUSED } else { PANEL });
-    frame.render_widget(
-        Paragraph::new(format!(
+    let marker = if focus { ">" } else { " " };
+    let text = if label.is_empty() {
+        format!("{marker}[{bar}]{}", value.display)
+    } else {
+        format!(
             "{} {label:<label_chars$.label_chars$} [{bar}] {}",
-            if focus { ">" } else { " " },
-            value.display
-        ))
-        .style(style),
-        area,
-    );
+            marker, value.display
+        )
+    };
+    frame.render_widget(Paragraph::new(text).style(style), area);
     hits.add(
         Rect::new(area.x + label_width + 1, area.y, bar_width, 1),
         control,
@@ -652,6 +700,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
             MixLayer::Drone => "Drone",
             MixLayer::Sub => "Sub rumble",
             MixLayer::Texture => "Noise / glitches",
+            MixLayer::Rain => "Rain",
             MixLayer::Harmony => "Harmony",
             MixLayer::Melody => "Distant melody",
             MixLayer::DemonicVoices => "Demonic voices",
@@ -699,7 +748,7 @@ fn mixer(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
 fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     let inner = panel(frame, area, " REVERB / Independent FX spaces ");
     let label_width = if inner.width >= 140 { 14 } else { 6 };
-    let columns = buttons::<5>(Rect::new(
+    let columns = buttons::<6>(Rect::new(
         inner.x + label_width,
         inner.y,
         inner.width - label_width,
@@ -713,7 +762,7 @@ fn reverb(frame: &mut Frame<'_>, area: Rect, app: &App, hits: &mut HitMap) {
     }
     for (bus, column) in ReverbBus::ALL.into_iter().zip(columns) {
         frame.render_widget(
-            Paragraph::new(bus.label().to_ascii_uppercase())
+            Paragraph::new(bus.label(column.width).to_ascii_uppercase())
                 .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Rect::new(column.x, column.y, column.width, 1),
         );
@@ -1372,6 +1421,12 @@ fn monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(ambient_lines(&snapshot).to_vec()),
         Rect::new(inner.x, inner.y + 9, inner.width, 2),
     );
+    if inner.height > 11 {
+        frame.render_widget(
+            Paragraph::new(rain_line(&snapshot)),
+            Rect::new(inner.x, inner.y + 11, inner.width, 1),
+        );
+    }
 
     if inner.height > 12 {
         let harmony_help = match background.harmony.mode {
@@ -1489,6 +1544,21 @@ fn ambient_lines(snapshot: &Snapshot) -> [Line<'static>; 2] {
     ]
 }
 
+fn rain_line(snapshot: &Snapshot) -> Line<'static> {
+    let rain = snapshot.background.rain;
+    Line::raw(format!(
+        "RAIN LP{:.0}>{:.0}Hz dry{:.0}>{:.0}% wet{:.0}>{:.0}% car{:.0}>{:.0}%",
+        rain.exterior_lowpass_hz.current,
+        rain.exterior_lowpass_hz.target,
+        rain.dry_gain.current * 100.0,
+        rain.dry_gain.target * 100.0,
+        rain.reverb_gain.current * 100.0,
+        rain.reverb_gain.target * 100.0,
+        rain.cabin_mix.current * 100.0,
+        rain.cabin_mix.target * 100.0,
+    ))
+}
+
 fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let inner = panel(frame, area, " BACKGROUND MONITOR / NOW > TARGET ");
     let Some(snapshot) = app.snapshot else {
@@ -1547,6 +1617,7 @@ fn monitor_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     lines.extend(arrangement_lines(&snapshot, inner.width));
     lines.extend(delay_lines(&snapshot));
     lines.extend(ambient_lines(&snapshot));
+    lines.push(rain_line(&snapshot));
     if inner.height > 17 {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1929,7 +2000,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
             ),
             Line::raw("M mute/unmute master   R reset scene   Q quit"),
             Line::raw("U toggle user simulator (starts ON): an abstract trading terminal."),
-            Line::raw("Spatial, humanized hovers, scrolls and actions; orders are rare."),
+            Line::raw("Spatial SFX and scene/zoom/market changes; orders are rare."),
             Line::raw("? help   Esc or ? closes this help"),
             Line::raw(""),
             Line::styled(
@@ -2195,7 +2266,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use shzx_sfx::{
-        Chord, ChordShape, Command, MarketContext, OutputInfo, RenderConfig, Renderer, ScaleDegree,
+        Chord, ChordShape, MarketContext, OutputInfo, RenderConfig, Renderer, ScaleDegree,
     };
 
     fn app() -> App {
@@ -2270,6 +2341,12 @@ mod tests {
                 .map(|x| buffer[(x, region.y)].symbol())
                 .collect::<String>();
             assert!(row.contains("-18.1dB"), "{width}x{height}: {row}");
+            let muted = hits
+                .region(Control::Mix(MixLayer::DemonicStutters))
+                .unwrap();
+            let row = (0..width)
+                .map(|x| buffer[(x, muted.y)].symbol())
+                .collect::<String>();
             assert!(row.contains("mute"), "{width}x{height}: {row}");
             let mut send = |_| Ok(());
             super::super::slide(&mut app, &hits, control, region.x, &mut send);
@@ -2417,9 +2494,9 @@ mod tests {
                     for expected in [
                         "ENVIRONMENT",
                         "UI / EVENTS",
-                        "TRANSMISSION",
                         "MELODY",
                         "ACCENTS",
+                        "RAIN",
                         "Room",
                         "Damp",
                         "Width",
@@ -2431,6 +2508,7 @@ mod tests {
                             "missing reverb control {expected:?}"
                         );
                     }
+                    assert!(text.contains("TRANSMISSION") || text.contains("TRANSMIT"));
                     for full_label in ["Room / tail", "Damping", "Wet level"] {
                         assert_eq!(
                             text.contains(full_label),
@@ -3131,6 +3209,63 @@ mod tests {
                 monitor.contains("BACKGROUND MONITOR"),
                 "{width}x{height}: {monitor}"
             );
+        }
+    }
+
+    #[test]
+    fn scene_event_log_shows_simulated_scene_market_and_deep_zoom_commands() {
+        use super::super::events::EventSource;
+        use std::time::Duration;
+
+        for (width, height) in [(80, 32), (160, 36)] {
+            let mut app = app();
+            for (index, command) in [
+                Command::Mode(Mode::Browse),
+                Command::Mode(Mode::Dialog),
+                Command::Mode(Mode::Focus),
+                Command::Market(MarketContext {
+                    trend: Trend::Bearish,
+                    zoom: Unit::new(0.95).unwrap(),
+                    volume: Unit::new(0.7).unwrap(),
+                    volatility: Unit::new(0.6).unwrap(),
+                    ..MarketContext::default()
+                }),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                app.event_log.advance(Duration::from_secs(index as u64));
+                app.event_log.record(EventSource::Simulator, command);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw(frame, &app);
+                })
+                .unwrap();
+            let text = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for expected in [
+                "scene browse / bunker",
+                "scene dialog / distant",
+                "scene focus / thinned",
+                "market bearish",
+                "zoom  95%",
+                "volume  70%",
+                "volatility  60%",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}:\n{text}"
+                );
+            }
+            assert_eq!(text.matches("SIM").count(), 4);
         }
     }
 

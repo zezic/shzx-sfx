@@ -1,6 +1,6 @@
 # shzx-sfx
 
-A native Rust procedural sound engine for Shizex: cold bunker ambience, sparse melancholic and tense minor harmony, distant melodic fragments, and a varied mechanical/digital UI palette. The engine synthesizes everything in memory. The audition CLI can explicitly export WAV files for listening and analysis; the runtime never loads audio assets.
+A native Rust procedural sound engine for Shizex: cold bunker ambience, procedural rain, sparse melancholic and tense minor harmony, distant melodic fragments, and a varied mechanical/digital UI palette. The engine synthesizes everything in memory. The audition CLI can explicitly export WAV files for listening and analysis; the runtime never loads audio assets.
 
 `Renderer` runs independently of an audio device and reproduces a fixed seed, sample rate, and command timeline. `AudioEngine` owns native CPAL playback and its lifecycle thread. Cloneable `AudioHandle`s submit typed commands through a bounded nonblocking queue. Dropping the owner stops playback and joins the thread, including when handles remain alive. DSP memory is allocated before playback.
 
@@ -18,7 +18,7 @@ cargo run --release -- play --script examples/demo.json --seconds 30
 
 Running without arguments shows help. In an interactive terminal, `play` opens a Ratatui/Crossterm control panel with calibrated default levels. The explicit `tui` command opens the same panel and requires a terminal on both stdin and stdout. Both accept `--device NAME` and `--buffer-frames N`; omit them to use the default device and its system buffer.
 
-The panel has seven tabs: Scene selects environment modes, market presets, harmony mode, and a 24-ticker grid; Market changes trend, strength, volume, volatility, zoom, and interaction activity; Mixer adjusts each layer and output gain; SFX browses all 37 effects beside the recipe inspector and sets audition pan and intensity; Monitor expands the background state; Reverb controls the environment, UI, transmission, melody, and accents processors separately; Inspect explains the selected event and auditions its components. The SFX page keeps the palette and audition controls on the left and its selected recipe inspector on the right, including at 80x24. Other control pages keep the background monitor: side by side at 140 columns or wider, stacked below on smaller terminals.
+The panel has seven tabs: Scene selects environment modes, market presets, harmony mode, and a 24-ticker grid; Market changes trend, strength, volume, volatility, zoom, and interaction activity; Mixer adjusts each layer and output gain; SFX browses all 37 effects beside the recipe inspector and sets audition pan and intensity; Monitor expands the background state; Reverb controls the environment, UI, transmission, melody, accents, and rain processors separately; Inspect explains the selected event and auditions its components. The SFX page keeps the palette and audition controls on the left and its selected recipe inspector on the right, including at 80x24. Other control pages keep the background monitor: side by side at 140 columns or wider, stacked below on smaller terminals.
 
 Harmony defaults to Dissonant, holding a fixed four-note chromatic voicing for each ticker; market changes leave it fixed. Use `--harmony diatonic` at startup for A natural minor and the slow chord clock, or choose Diatonic/Dissonant on Scene. The REPL accepts `harmony diatonic` and `harmony dissonant`. The current harmony label and a `fixed` clock identify Dissonant mode in the monitor. The [ASCII mapping rule](docs/sound-design-research.md#ticker-derived-chromatic-harmony) defines how the whole ticker selects four distinct notes from all twelve pitch classes.
 
@@ -28,11 +28,15 @@ Automatic ticker navigation is enabled by default in the TUI. It chooses a diffe
 
 The user activity simulator starts enabled. Click **User sim ON (u)** in the main screen's footer, or press `u`, to pause or resume it. It simulates an abstract trading terminal with frequent pointer hovers and short scroll bursts between clicks, scrollbar and panel drags, chart zoom/resize, tabs, search, dialogs, settings, alerts, and reconnects. A shuffled workflow cycle covers the complete UI SFX palette, with varied delays, reading pauses, and gentle intensity variation. Virtual screen positions control pan: watchlist/search on the left, chart/dialogs in the center, order ticket/alerts on the right. Order workflows alternate fills and cancellations, become eligible after 45-75 seconds, and leave at least 45 seconds after completion before another order workflow. The footer shows the current workflow. Simulator events use your sound edits while preserving manual audition selection, pan, intensity, and focus. Reset restarts the simulator.
 
-On larger terminals, **USER EVENTS** fills the space beneath the Scene ticker grid and follows the newest events. It retains the last 128 accepted simulator events and manual SFX auditions, with elapsed time, SIM/USER source, effect, pan, and intensity. Pausing and resetting preserve this history. At 80x24 the log is hidden to keep all controls accessible.
+The workflows also control the live scene: dialogs enter Dialog/distant, focused searches and chart inspection enter Focus/thinned, and closing or leaving them restores Browse/bunker. These states last several seconds so their audio transitions can be heard. Chart inspection zooms into roughly 95% depth before returning to an overview. Idle, Bullish, Bearish, and Volatile markets cycle in shuffled order; changes become eligible 25-60 seconds after the previous accepted market change and occur between workflows. Market changes preserve zoom, and zoom changes preserve market conditions. Pausing holds the current scene and market for manual adjustment.
+
+On larger terminals, **USER EVENTS** fills the space beneath the Scene ticker grid and follows the newest events. It retains the last 128 accepted simulator and manual commands, showing scene and market/zoom changes alongside SFX details, with elapsed time and SIM/USER source. Pausing and resetting preserve this history. At 80x24 the log is hidden to keep all controls accessible.
 
 Monitor shows market input smoothing, focus, low/high-pass cutoffs, reverb room size, harmonic crossfade progress, the next chord preview and clock, harmonic swell, and detail/melody activity and schedules. Separate detail and melody ping-pong sends respond to view conditions; their current and target delay times, feedback, and sends are visible too. In Diatonic mode, new market inputs can change the chord preview, and held clocks identify harmonic changes deferred by focus. Dissonant harmony stays fixed by the ticker while market and focus controls reshape the texture. Melodic entrances can be held by focus in either mode.
 
 Four additional autonomous layers have independent Mixer controls and activity clocks in Monitor: Demonic voices, Demonic stutters, Flying coins, and Laser beams. Their startup gains are defined by [`Mix::default`](src/model.rs). The matching CLI/REPL names are `demonic-voices`, `demonic-stutters`, `flying-coins`, and `laser-beams`; for example, `--mute-layer laser-beams` or `mix demonic-voices 0.2`.
+
+Rain combines a diffuse stereo wash with irregular drop impacts, with an independent Rain mixer fader (`Mix.rain`, default 0.02) and reverb (`ReverbSettings.rain`). Use `mix rain 0.3`, `--mute-layer rain`, or `reverb rain wet 0.28` to adjust it. Dialog / distant and Focus / thinned smoothly reduce its dry signal and increase its reverberant return. Deep zoom blends toward rain heard inside a closed car: low-pass filtered exterior rain with nearby damped roof and body impacts. The rain continues through scene transitions. Larger Monitor layouts show the rain low-pass, dry/wet balance, and cabin blend. The [rain synthesis research](docs/rain-synthesis-research.md) records the primary sources and design choices.
 
 Demonic voices shape a pink-noise and sine source with moving vowel formants following the current ticker's spoken letter names. Pink noise is soft-clipped, mixed with a seeded 30-110 Hz sine at amplitude 0.1, boosted by 6 dB, and soft-clipped again before the formant filters. Up to two voices share separated Haas positions; stutters use a quieter, changing fast gate.
 
@@ -64,7 +68,7 @@ UI effects pass through a broad bell cut centered at 3 kHz, -9 dB, Q 0.65, befor
 
 Sharp routine sounds use fast attacks with lower sustain and slightly longer decay/release, rather than a strict flat held body. Click uses roughly 0.25 ms attack, 8 ms decay, 5.5% sustain, and 4 ms release; SecondaryClick uses 0.3/10 ms, 4.5%, and 4.5 ms. Longer action signatures retain their envelopes.
 
-Reverb tab `6` offers Environment, UI/event, Transmission, Melody, and Accents columns, each with independent Send, Room/tail, Damping, Width, and Wet controls. UI send defaults to 12%, versus 85% for the environment, keeping events close with quieter tails. Transmission defaults to 67% send, 83% damping, and 25% wet. Melody defaults to 95% send, 88% room, 68% damping, 92% width, and 85% wet; its settings are available through `ReverbSettings.melody` and REPL commands beginning with `reverb melody`. Accents default to 85% send, 88% room, 8% damping, 92% width, and 32% wet. Send controls new input to the processor; turning it down preserves the tail already in flight. Wet controls the returning tail. Dialog and Focus smoothly narrow the environment, UI, melody, and accents reverberant stereo fields. Room controls tail character rather than a guaranteed number of decay seconds.
+Reverb tab `6` offers Environment, UI/event, Transmission, Melody, Accents, and Rain columns, each with independent Send, Room/tail, Damping, Width, and Wet controls. UI send defaults to 12%, versus 85% for the environment, keeping events close with quieter tails. Transmission defaults to 67% send, 83% damping, and 25% wet. Melody defaults to 95% send, 88% room, 68% damping, 92% width, and 85% wet; its settings are available through `ReverbSettings.melody` and REPL commands beginning with `reverb melody`. Accents default to 85% send, 88% room, 8% damping, 92% width, and 32% wet. Rain defaults to 65% send, 72% room, 55% damping, 90% width, and 28% wet. Send controls new input to the processor; turning it down preserves the tail already in flight. Wet controls the returning tail. Dialog and Focus smoothly narrow the environment, UI, melody, accents, and rain reverberant stereo fields. Room controls tail character rather than a guaranteed number of decay seconds.
 
 Use `1` through `7` to switch tabs, `Tab`/`Shift-Tab` to focus controls, and arrows to navigate or change values. Hold `Shift` with an arrow for finer adjustment; `Home`/`End` set slider bounds. `Enter` activates a button. In SFX, Up/Down browse sounds, Page Up/Down move eight sounds, and `Space` auditions the selection. You can also click buttons, click or drag sliders, and use the wheel to browse effects. Clicking a sound name immediately auditions it; repeated clicks create fresh variations. Keyboard and wheel browsing remain silent.
 
@@ -113,6 +117,7 @@ harmony dissonant
 harmony diatonic
 mix harmony 0.4
 mix texture 0.3
+mix rain 0.3
 mix sub 0.35
 mix transmission 0.22
 mix demonic-voices 0.3
@@ -129,6 +134,7 @@ reverb transmission wet 0.25
 reverb melody send 0.95
 reverb melody wet 0.85
 reverb accents damping 0.08
+reverb rain wet 0.28
 symbol MSFT
 mix master 0
 spatial pan

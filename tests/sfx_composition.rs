@@ -21,6 +21,7 @@ fn dry_renderer(sample_rate: u32) -> Renderer {
             demonic_stutters: Unit::ZERO,
             flying_coins: Unit::ZERO,
             laser_beams: Unit::ZERO,
+            rain: Unit::ZERO,
             sub: Unit::ZERO,
             transmission: Unit::ZERO,
             texture: Unit::ZERO,

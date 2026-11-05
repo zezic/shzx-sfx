@@ -437,30 +437,45 @@ impl App {
         }
     }
 
+    fn apply_accepted(&mut self, command: Command, source: events::EventSource) {
+        match command {
+            Command::Market(market) => self.market = market,
+            Command::Mode(mode) => self.mode = mode,
+            Command::Harmony(mode) => self.harmony_mode = mode,
+            Command::Mix(mix) => self.mix = mix,
+            Command::Symbol(symbol) => {
+                self.symbol = symbol;
+                self.ticker_navigation.symbol_changed(symbol);
+            }
+            Command::Reverb(reverb) => self.reverb = reverb,
+            Command::Spatial(spatial) => self.spatial = spatial,
+            Command::Trigger(event) => {
+                if source == events::EventSource::User {
+                    self.effect = event.kind;
+                }
+            }
+            Command::DataTransmission(_) => {}
+        }
+        self.event_log.record(source, command);
+    }
+
     fn submit(
         &mut self,
         command: Command,
         send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
     ) -> bool {
+        self.submit_from(command, events::EventSource::User, send)
+    }
+
+    fn submit_from(
+        &mut self,
+        command: Command,
+        source: events::EventSource,
+        send: &mut impl FnMut(Command) -> shzx_sfx::Result<()>,
+    ) -> bool {
         match send(command) {
             Ok(()) => {
-                match command {
-                    Command::Market(market) => self.market = market,
-                    Command::Mode(mode) => self.mode = mode,
-                    Command::Harmony(mode) => self.harmony_mode = mode,
-                    Command::Mix(mix) => self.mix = mix,
-                    Command::Symbol(symbol) => {
-                        self.symbol = symbol;
-                        self.ticker_navigation.symbol_changed(symbol);
-                    }
-                    Command::Reverb(reverb) => self.reverb = reverb,
-                    Command::Spatial(spatial) => self.spatial = spatial,
-                    Command::Trigger(event) => {
-                        self.effect = event.kind;
-                        self.event_log.record(events::EventSource::User, event);
-                    }
-                    Command::DataTransmission(_) => {}
-                }
+                self.apply_accepted(command, source);
                 self.notice = match command {
                     Command::Trigger(event) => format!(
                         "Playing {} [{}] | pan {:+.2} | intensity {:.0}%",
@@ -515,19 +530,42 @@ impl App {
         if self.overlay != Overlay::SymbolEntry
             && let Some(symbol) = self.ticker_navigation.due()
         {
-            self.submit(Command::Symbol(symbol), send);
+            self.submit_from(
+                Command::Symbol(symbol),
+                events::EventSource::Simulator,
+                send,
+            );
         }
         let edits = &self.effect_edits;
-        let event_log = &mut self.event_log;
-        if let Err(error) = self.activity.advance(elapsed, &mut |event| {
-            let event = SfxEvent {
-                edits: edits.get(&event.kind).copied().unwrap_or_default(),
-                ..event
+        let market = self.market;
+        let mut accepted = None;
+        let result = self.activity.advance(elapsed, &mut |action| {
+            let command = match action {
+                activity::Action::Trigger {
+                    kind,
+                    pan,
+                    intensity,
+                } => Command::Trigger(SfxEvent {
+                    pan,
+                    intensity,
+                    edits: edits.get(&kind).copied().unwrap_or_default(),
+                    ..SfxEvent::new(kind)
+                }),
+                activity::Action::Mode(mode) => Command::Mode(mode),
+                activity::Action::Market(preset) => Command::Market(MarketContext {
+                    zoom: market.zoom,
+                    ..preset.market()
+                }),
+                activity::Action::Zoom(zoom) => Command::Market(MarketContext { zoom, ..market }),
             };
-            send(Command::Trigger(event))?;
-            event_log.record(events::EventSource::Simulator, event);
+            send(command)?;
+            accepted = Some(command);
             Ok(())
-        }) {
+        });
+        if let Some(command) = accepted {
+            self.apply_accepted(command, events::EventSource::Simulator);
+        }
+        if let Err(error) = result {
             self.notice = format!("User activity pending: {error}");
         }
     }
